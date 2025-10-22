@@ -1,0 +1,21 @@
+name: Monitor de Chuvas
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # roda todo início de hora
+  workflow_dispatch:       # permite rodar manualmente
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Run script
+        run: node bot.js
