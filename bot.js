@@ -1,4 +1,4 @@
-// bot.js — DIAGNÓSTICO sem "continue"
+// bot.js — DIAGNÓSTICO LIMPO (sem continue, sem return final)
 import fetch from "node-fetch";
 
 const CHAT_ID = -1003065918727;
@@ -38,51 +38,51 @@ const CITIES = [
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r,ms));
 
-function api(lat, lon) {
+function api(lat, lon){
   return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 }
-function nowHH(ts) {
-  if (!ts) return "";
+function fmt(mm){
+  const n = Number(mm??0);
+  return Number.isFinite(n)? (n%1===0?String(n):n.toFixed(1)):"0";
+}
+function hh(ts){
+  if(!ts) return "";
   return new Date(ts*1000).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",hour12:false});
 }
-function f(mm){
-  const n = Number(mm??0);
-  return Number.isFinite(n) ? (n%1===0?String(n):n.toFixed(1)) : "0";
-}
 
-async function send(text){
+async function sendHTML(text){
   await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`,{
     method:"POST",
     headers:{ "Content-Type":"application/json" },
-    body:JSON.stringify({ chat_id:CHAT_ID,text,parse_mode:"HTML"})
+    body:JSON.stringify({ chat_id:CHAT_ID,text,parse_mode:"HTML" })
   });
 }
 
-export default async () => {
+async function run(){
   const diag=[];
   const rainMsgs=[];
   const officialMsgs=[];
 
   for(const c of CITIES){
     try{
-      const res = await fetch(api(c.lat,c.lon));
-      if(!res.ok){
-        diag.push(`${c.uf}-${c.name}: HTTP ${res.status}`);
-      } else {
-        const data = await res.json();
-        const mm = data?.hourly?.[0]?.rain?.["1h"] ?? 0;
-        const alerts = Array.isArray(data.alerts)? data.alerts.length:0;
-        const endA = Array.isArray(data.alerts)&&data.alerts[0]?.end ? `, até ${nowHH(data.alerts[0].end)}`:"";
-        diag.push(`${c.uf}-${c.name}: ${f(mm)} mm/h, alerts=${alerts}${endA}`);
+      const r = await fetch(api(c.lat,c.lon));
+      if(!r.ok){
+        diag.push(`${c.uf}-${c.name}: HTTP ${r.status}`);
+      }else{
+        const d = await r.json();
+        const mm = d?.hourly?.[0]?.rain?.["1h"] ?? 0;
+        const alerts = Array.isArray(d.alerts)? d.alerts.length:0;
+        const end = Array.isArray(d.alerts)&&d.alerts[0]?.end? ` até ${hh(d.alerts[0].end)}`:"";
+        diag.push(`${c.uf}-${c.name}: ${fmt(mm)} mm/h, alerts=${alerts}${end}`);
 
         if(mm>=THRESHOLD_MM){
-          rainMsgs.push(`🌧️ <b>${c.name.toUpperCase()}</b>\n~${f(mm)} mm/h`);
+          rainMsgs.push(`🌧️ <b>${c.name.toUpperCase()}</b>\n~${fmt(mm)} mm/h`);
         }
-        if(Array.isArray(data.alerts)){
-          for(const a of data.alerts){
-            officialMsgs.push(`🚨 ALERTA — ${c.name.toUpperCase()}\n${a.event||"Alerta"}\nAté: ${nowHH(a.end)}`);
+        if(Array.isArray(d.alerts)){
+          for(const a of d.alerts){
+            officialMsgs.push(`🚨 ALERTA — ${c.name.toUpperCase()}\n${a.event||"Alerta"}\nAté: ${hh(a.end)}`);
           }
         }
       }
@@ -92,21 +92,13 @@ export default async () => {
     await sleep(API_CALL_DELAY_MS);
   }
 
-  for(const m of rainMsgs){ await send(m); await sleep(SEND_DELAY_MS); }
-  for(const m of officialMsgs){ await send(m); await sleep(SEND_DELAY_MS); }
+  for(const m of rainMsgs){ await sendHTML(m); await sleep(SEND_DELAY_MS); }
+  for(const m of officialMsgs){ await sendHTML(m); await sleep(SEND_DELAY_MS); }
 
-  await send(`<b>DIAGNÓSTICO</b>\n<pre>${diag.join("\n")}</pre>\nChuva=${rainMsgs.length},Oficiais=${officialMsgs.length}`);
-};  // Envia o que tiver de fato
-  let sent = 0;
-  for (const m of rainMsgs) { await sendTelegramHTML(m); await sleep(SEND_DELAY_MS); sent++; }
-  for (const m of officialMsgs) { await sendTelegramHTML(m); await sleep(SEND_DELAY_MS); sent++; }
+  await sendHTML(`<b>DIAGNÓSTICO</b>\n<pre>${diag.join("\n")}</pre>\nChuva=${rainMsgs.length}, Oficiais=${officialMsgs.length}`);
+}
 
-  // Envia RESUMO TÉCNICO desta execução (sempre), pra entendermos o que a API retornou
-  const chunkSize = 3500; // HTML do Telegram tem limite ~4096
-  const full = `<b>Diagnóstico OneCall</b>\n<pre>${diag.join('\n')}</pre>\nEnviadas agora: chuva=${rainMsgs.length}, oficiais=${officialMsgs.length}`;
-  // quebra se ficar grande demais
-  for (let i=0; i<full.length; i+=chunkSize) {
-    const part = full.slice(i, i+chunkSize);
+run();    const part = full.slice(i, i+chunkSize);
     await sendTelegramHTML(part);
     await sleep(1000);
   }
