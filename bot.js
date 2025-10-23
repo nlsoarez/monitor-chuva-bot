@@ -1,16 +1,17 @@
-// bot.js — gratuito (Forecast 2.5) com previsão de chuva forte
+// bot.js — Forecast 2.5 (grátis) + Alertas detalhados + DIAGNÓSTICO sempre
 // Requer secrets: TELEGRAM_BOT_TOKEN, OPENWEATHER_KEY
-// Regras: envia 1 alerta por cidade se houver chuva >=10 mm/h nas próximas 6h
-// Delay 5s entre mensagens; envio "Sem alertas" só às ~01:00 UTC (≈22:00 BRT) se nada detectado
 
 import fetch from "node-fetch";
 
-const CHAT_ID = -1003065918727;   // grupo
-const THRESHOLD_MM_PER_HOUR = 10; // limiar
-const FORECAST_HOURS = 6;         // horizonte de previsão (3h + 3h)
-const SEND_DELAY_MS = 5000;
-const API_CALL_DELAY_MS = 400;
+// ===== CONFIG =====
+const CHAT_ID = -1003065918727;       // grupo
+const THRESHOLD_MM_PER_HOUR = 10;     // limite para alerta
+const FORECAST_HOURS = 6;             // horizonte (duas janelas de 3h)
+const SEND_DELAY_MS = 5000;           // delay entre mensagens (alertas e blocos de diagnóstico)
+const API_CALL_DELAY_MS = 400;        // leve intervalo entre chamadas de API
+const DIAG_BLOCK_SIZE = 10;           // até 10 cidades por mensagem de diagnóstico
 
+// Capitais
 const CITIES = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
   { uf:"AL", name:"Maceió",lat:-9.64985,lon:-35.70895},
@@ -41,15 +42,20 @@ const CITIES = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
+// ===== HELPERS =====
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const toBRTime = (tsSec) =>
-  new Date(tsSec * 1000).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  new Date(tsSec * 1000).toLocaleTimeString("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 
 function forecastUrl(lat, lon) {
-  // 5-day/3-hour forecast
   return `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 }
 
@@ -64,21 +70,23 @@ async function sendTelegramHTML(text) {
   return data;
 }
 
-function isDailySummaryHourUTC() {
-  // ~22:00 BRT ≈ 01:00 UTC (ajuste simples)
-  return new Date().getUTCHours() === 1;
-}
-
 function mmhFromRain3h(rain3h) {
   const mm3h = Number(rain3h ?? 0);
   if (!Number.isFinite(mm3h)) return 0;
-  return mm3h / 3; // converte mm/3h para mm/h aproximado
+  return mm3h / 3;
 }
 
 function fmtMM(n) {
   return Number.isFinite(n) ? (n % 1 === 0 ? String(n) : n.toFixed(1)) : "0";
 }
 
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// ===== MAIN =====
 async function main() {
   if (!TOKEN) {
     console.log("ERRO: TELEGRAM_BOT_TOKEN ausente.");
@@ -89,25 +97,26 @@ async function main() {
     process.exit(1);
   }
 
-  let sentCount = 0;
+  const alerts = [];         // {city, maxMMh, start, end}
+  const diagLines = [];      // linhas de diagnóstico por cidade (formato estilo alerta)
+  const now = Date.now() / 1000;
+  const horizon = now + FORECAST_HOURS * 3600;
 
   for (const c of CITIES) {
     try {
       const r = await fetch(forecastUrl(c.lat, c.lon));
       if (!r.ok) {
         console.log(`Forecast falhou em ${c.name}: HTTP ${r.status}`);
+        diagLines.push(`🚫 ${c.uf} — ${c.name}: erro HTTP ${r.status}`);
         await sleep(API_CALL_DELAY_MS);
         continue;
       }
       const data = await r.json();
       const list = Array.isArray(data?.list) ? data.list : [];
 
-      // pega janelas até 6h à frente (2 entradas de 3h)
-      const now = Date.now() / 1000;
-      const horizon = now + FORECAST_HOURS * 3600;
-      const next = list.filter(it => it.dt >= now && it.dt <= horizon);
+      // filtra próximas 6h (entradas de 3h)
+      const next = list.filter((it) => it.dt >= now && it.dt <= horizon);
 
-      // calcula pico de mm/h na janela (a partir de rain["3h"])
       let maxMMh = 0;
       let best = null;
       for (const it of next) {
@@ -119,31 +128,47 @@ async function main() {
         }
       }
 
-      if (maxMMh >= THRESHOLD_MM_PER_HOUR && best) {
-        // envia APENAS 1 alerta por cidade (P6 = 1)
+      if (best && maxMMh >= THRESHOLD_MM_PER_HOUR) {
         const start = toBRTime(best.dt);
         const end = toBRTime(best.dt + 3 * 3600);
-        const msg =
-          `🌧️ Chuva forte prevista em <b>${c.name.toUpperCase()}</b>\n` +
-          `~${fmtMM(maxMMh)} mm/h entre ${start}–${end}`;
-        await sendTelegramHTML(msg);
-        sentCount++;
-        await sleep(SEND_DELAY_MS);
-      }
+        alerts.push({ city: c.name, uf: c.uf, maxMMh, start, end });
 
+        // linha de diagnóstico para alerta real
+        diagLines.push(
+          `🌧️ ${c.name.toUpperCase()} — pico previsto ${fmtMM(maxMMh)} mm/h (${start}–${end})\n` +
+          `➡️ ALERTA DISPARADO`
+        );
+      } else {
+        // diagnóstico sem chuva forte
+        diagLines.push(`☀️ ${c.name.toUpperCase()} — sem chuva forte prevista`);
+      }
     } catch (e) {
       console.log(`Erro em ${c.name}:`, e.message);
+      diagLines.push(`🚫 ${c.name.toUpperCase()} — erro: ${e.message}`);
     }
 
     await sleep(API_CALL_DELAY_MS);
   }
 
-  // resumo diário às ~22:00 BRT se nada foi enviado
-  if (sentCount === 0 && isDailySummaryHourUTC()) {
-    await sendTelegramHTML("✅ Sem alertas no momento");
+  // 1) Envia ALERTAS detalhados (AR2) primeiro
+  for (const a of alerts) {
+    const msg =
+      `🌧️ <b>ALERTA DE CHUVA FORTE — ${a.city.toUpperCase()}</b>\n` +
+      `Volume previsto: <b>~${fmtMM(a.maxMMh)} mm/h</b>\n` +
+      `Janela estimada: <b>${a.start}–${a.end}</b>\n` +
+      `Fique atento a possíveis alagamentos.`;
+    await sendTelegramHTML(msg);
+    await sleep(SEND_DELAY_MS);
   }
 
-  console.log(`Execução finalizada. Alertas enviados: ${sentCount}`);
+  // 2) Envia DIAGNÓSTICO completo sempre (DIA1), em blocos de 10 linhas com delay entre blocos
+  const blocks = chunk(diagLines, DIAG_BLOCK_SIZE);
+  for (const b of blocks) {
+    await sendTelegramHTML(b.join("\n\n"));
+    await sleep(SEND_DELAY_MS);
+  }
+
+  console.log(`Execução OK. Alertas: ${alerts.length}. Blocos diagnóstico: ${blocks.length}`);
 }
 
 main();
