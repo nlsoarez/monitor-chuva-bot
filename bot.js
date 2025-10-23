@@ -1,4 +1,3 @@
-// bot.js — DIAGNÓSTICO LIMPO (sem continue, sem return final)
 import fetch from "node-fetch";
 
 const CHAT_ID = -1003065918727;
@@ -98,64 +97,4 @@ async function run(){
   await sendHTML(`<b>DIAGNÓSTICO</b>\n<pre>${diag.join("\n")}</pre>\nChuva=${rainMsgs.length}, Oficiais=${officialMsgs.length}`);
 }
 
-run();    const part = full.slice(i, i+chunkSize);
-    await sendTelegramHTML(part);
-    await sleep(1000);
-  }
-
-  return `diag: ${diag.length} cidades, enviados=${sent}`;
-};        await sleep(API_CALL_DELAY_MS);
-        continue;
-      }
-      const data = await r.json();
-
-      // --- chuva forte (próxima hora) ---
-      const mm = data?.hourly?.[0]?.rain?.["1h"] ?? 0;
-      if (mm >= THRESHOLD_MM) {
-        const text =
-          `🌧️ Chuva forte em <b>${c.name.toUpperCase()}</b>\n` +
-          `~${fmtMM(mm)} mm/h na próxima hora`;
-        rainMsgs.push(text);
-      }
-
-      // --- alertas oficiais (enviar todos, O3 com validade) ---
-      if (Array.isArray(data.alerts)) {
-        for (const a of data.alerts) {
-          const endTxt = fmtHour(a.end || a.expires);
-          const header = `🚨 ALERTA OFICIAL — ${c.name.toUpperCase()}`;
-          const body = a.event || "Weather alert";
-          const validity = endTxt ? `\nVálido até: ${endTxt}` : "";
-          officialMsgs.push(`${header}\n${body}${validity}`);
-        }
-      }
-    } catch (e) {
-      console.log(`Erro em ${c.name}:`, e.message);
-    }
-    await sleep(API_CALL_DELAY_MS);
-  }
-
-  let sentCount = 0;
-
-  // 1) Envia chuva forte
-  for (const msg of rainMsgs) {
-    await sendTelegramHTML(msg);
-    await sleep(SEND_DELAY_MS);
-    sentCount++;
-  }
-
-  // 2) Envia alertas oficiais
-  for (const msg of officialMsgs) {
-    await sendTelegramHTML(msg);
-    await sleep(SEND_DELAY_MS);
-    sentCount++;
-  }
-
-  // 3) Se nada enviado e for 22:00 BRT (~01:00 UTC), mandar "Sem alertas"
-  if (sentCount === 0 && isDailySummaryHourUTC()) {
-    await sendTelegramHTML("✅ Sem alertas no momento");
-  }
-
-  console.log(`Enviadas agora: chuva=${rainMsgs.length}, oficiais=${officialMsgs.length}, daily=${sentCount === 0 && isDailySummaryHourUTC() ? 1 : 0}`);
-}
-
-main();
+run();
