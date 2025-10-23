@@ -1,8 +1,7 @@
-// bot.js — DIAGNÓSTICO (mostra mm/h e alerts[] por cidade)
-// Requer TELEGRAM_BOT_TOKEN e OPENWEATHER_KEY nos Secrets
+// bot.js — DIAGNÓSTICO sem "continue"
 import fetch from "node-fetch";
 
-const CHAT_ID = -1003065918727;   // grupo
+const CHAT_ID = -1003065918727;
 const THRESHOLD_MM = 10;
 const SEND_DELAY_MS = 5000;
 const API_CALL_DELAY_MS = 500;
@@ -41,72 +40,63 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function oneCallUrl(lat, lon) {
+function api(lat, lon) {
   return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 }
-function fmtMM(mm){ const n=Number(mm??0); return Number.isFinite(n)?(n%1===0?String(n):n.toFixed(1)):"0"; }
-function fmtHour(ts){ if(!ts)return""; const d=new Date(ts*1000); return d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",hour12:false}); }
+function nowHH(ts) {
+  if (!ts) return "";
+  return new Date(ts*1000).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",hour12:false});
+}
+function f(mm){
+  const n = Number(mm??0);
+  return Number.isFinite(n) ? (n%1===0?String(n):n.toFixed(1)) : "0";
+}
 
-async function sendTelegramHTML(text) {
-  const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
-  const resp = await fetch(url, {
+async function send(text){
+  await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`,{
     method:"POST",
     headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode:"HTML" })
+    body:JSON.stringify({ chat_id:CHAT_ID,text,parse_mode:"HTML"})
   });
-  const data = await resp.json();
-  if(!data.ok) console.log("ERRO TELEGRAM:", data);
-  return data;
 }
 
 export default async () => {
-  if (!TOKEN || !OPENWEATHER_KEY) {
-    console.log("Secrets ausentes."); 
-    return;
-  }
+  const diag=[];
+  const rainMsgs=[];
+  const officialMsgs=[];
 
-  const rainMsgs = [];
-  const officialMsgs = [];
-  const diag = [];
+  for(const c of CITIES){
+    try{
+      const res = await fetch(api(c.lat,c.lon));
+      if(!res.ok){
+        diag.push(`${c.uf}-${c.name}: HTTP ${res.status}`);
+      } else {
+        const data = await res.json();
+        const mm = data?.hourly?.[0]?.rain?.["1h"] ?? 0;
+        const alerts = Array.isArray(data.alerts)? data.alerts.length:0;
+        const endA = Array.isArray(data.alerts)&&data.alerts[0]?.end ? `, até ${nowHH(data.alerts[0].end)}`:"";
+        diag.push(`${c.uf}-${c.name}: ${f(mm)} mm/h, alerts=${alerts}${endA}`);
 
-  for (const c of CITIES) {
-    try {
-      const r = await fetch(oneCallUrl(c.lat, c.lon));
-      const status = r.status;
-      if (!r.ok) {
-        diag.push(`${c.uf}-${c.name}: HTTP ${status}`);
-        await sleep(API_CALL_DELAY_MS);
-        continue;
-      }
-      const data = await r.json();
-
-      const mm = data?.hourly?.[0]?.rain?.["1h"] ?? 0;
-      const alerts = Array.isArray(data.alerts) ? data.alerts.length : 0;
-
-      // acumula diagnósticos
-      const lastAlertEnd = (Array.isArray(data.alerts) && data.alerts[0]?.end) ? `, end ${fmtHour(data.alerts[0].end)}` : "";
-      diag.push(`${c.uf}-${c.name}: ${fmtMM(mm)} mm/h, alerts=${alerts}${lastAlertEnd}`);
-
-      // regras normais
-      if (mm >= THRESHOLD_MM) {
-        rainMsgs.push(`🌧️ Chuva forte em <b>${c.name.toUpperCase()}</b>\n~${fmtMM(mm)} mm/h na próxima hora`);
-      }
-      if (Array.isArray(data.alerts)) {
-        for (const a of data.alerts) {
-          const endTxt = fmtHour(a.end || a.expires);
-          const header = `🚨 ALERTA OFICIAL — ${c.name.toUpperCase()}`;
-          const body = a.event || "Weather alert";
-          const validity = endTxt ? `\nVálido até: ${endTxt}` : "";
-          officialMsgs.push(`${header}\n${body}${validity}`);
+        if(mm>=THRESHOLD_MM){
+          rainMsgs.push(`🌧️ <b>${c.name.toUpperCase()}</b>\n~${f(mm)} mm/h`);
+        }
+        if(Array.isArray(data.alerts)){
+          for(const a of data.alerts){
+            officialMsgs.push(`🚨 ALERTA — ${c.name.toUpperCase()}\n${a.event||"Alerta"}\nAté: ${nowHH(a.end)}`);
+          }
         }
       }
-    } catch (e) {
+    }catch(e){
       diag.push(`${c.uf}-${c.name}: ERRO ${e.message}`);
     }
     await sleep(API_CALL_DELAY_MS);
   }
 
-  // Envia o que tiver de fato
+  for(const m of rainMsgs){ await send(m); await sleep(SEND_DELAY_MS); }
+  for(const m of officialMsgs){ await send(m); await sleep(SEND_DELAY_MS); }
+
+  await send(`<b>DIAGNÓSTICO</b>\n<pre>${diag.join("\n")}</pre>\nChuva=${rainMsgs.length},Oficiais=${officialMsgs.length}`);
+};  // Envia o que tiver de fato
   let sent = 0;
   for (const m of rainMsgs) { await sendTelegramHTML(m); await sleep(SEND_DELAY_MS); sent++; }
   for (const m of officialMsgs) { await sendTelegramHTML(m); await sleep(SEND_DELAY_MS); sent++; }
