@@ -41,10 +41,13 @@ const sleep = (ms) => new Promise(r => setTimeout(r,ms));
 
 function api(lat, lon){
   return `https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
+} //  <<<<<<  FECHADO AQUI  ✅
+
 function fmt(mm){
   const n = Number(mm??0);
   return Number.isFinite(n)? (n%1===0?String(n):n.toFixed(1)):"0";
 }
+
 function hh(ts){
   if(!ts) return "";
   return new Date(ts*1000).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",hour12:false});
