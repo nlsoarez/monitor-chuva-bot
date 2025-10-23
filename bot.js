@@ -1,12 +1,16 @@
-// bot.js
+// bot.js — GitHub Actions (Node 18, ESM)
+// Envia alertas de chuva ≥10 mm/h (formato M1) e alertas oficiais (O3, com validade quando houver)
+// Ordem de envio: 1) chuva forte, 2) alertas oficiais
+// Delay entre mensagens: 5s
+// Requer Secrets: TELEGRAM_BOT_TOKEN, OPENWEATHER_KEY
 import fetch from "node-fetch";
 
-// ===== CONFIGURAÇÕES =====
-const CHAT_ID = -1003065918727;     // grupo "Alertas de Chuva Brasil"
-const THRESHOLD_MM = 10;            // chuva forte
-const DELAY_MS = 5000;              // 5s entre alertas (P4 = B)
+// ===== CONFIG =====
+const CHAT_ID = -1003065918727;   // grupo
+const THRESHOLD_MM = 10;          // chuva forte
+const SEND_DELAY_MS = 5000;       // 5s entre mensagens
+const API_CALL_DELAY_MS = 500;    // pequena pausa entre chamadas à OneCall
 
-// Lista de capitais (UF, nome, lat, lon)
 const CITIES = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
   { uf:"AL", name:"Maceió",lat:-9.64985,lon:-35.70895},
@@ -37,29 +41,21 @@ const CITIES = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
-// ===== HELPERS =====
+// ===== UTILS =====
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
 
-function sleep(ms) {
-  return new Promise((res) => setTimeout(res, ms));
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function sendTelegramHTML(text) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: CHAT_ID,
-      text,
-      parse_mode: "HTML"   // P2 = 3 (formatação rica)
-    }),
+    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
   });
   const data = await resp.json();
-  if (!data.ok) {
-    console.log("ERRO TELEGRAM:", data);
-  }
+  if (!data.ok) console.log("ERRO TELEGRAM:", data);
   return data;
 }
 
@@ -67,52 +63,78 @@ function oneCallUrl(lat, lon) {
   return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 }
 
-// ===== EXECUÇÃO =====
+function fmtMM(mm) {
+  const n = Number(mm ?? 0);
+  return n % 1 === 0 ? String(n) : n.toFixed(1);
+}
+
+function fmtHour(tsSec, tz) {
+  if (!tsSec) return null;
+  // mostra horário local de Brasília para simplicidade (sem depender do tz da cidade)
+  const d = new Date(tsSec * 1000);
+  return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+// ===== MAIN =====
 async function main() {
   if (!TOKEN) {
-    console.log("ERRO: TELEGRAM_BOT_TOKEN não definido (Secret ausente).");
+    console.log("ERRO: TELEGRAM_BOT_TOKEN ausente.");
     process.exit(1);
   }
   if (!OPENWEATHER_KEY) {
-    console.log("ERRO: OPENWEATHER_KEY não definido (Secret ausente).");
+    console.log("ERRO: OPENWEATHER_KEY ausente.");
     process.exit(1);
   }
 
-  const alerts = [];
+  const rainMsgs = [];
+  const officialMsgs = [];
 
   for (const c of CITIES) {
     try {
       const r = await fetch(oneCallUrl(c.lat, c.lon));
       if (!r.ok) {
-        console.log(`Falha OneCall em ${c.name}: HTTP ${r.status}`);
+        console.log(`OneCall falhou em ${c.name}: HTTP ${r.status}`);
+        await sleep(API_CALL_DELAY_MS);
         continue;
       }
       const data = await r.json();
 
-      // chuva forte na próxima hora
+      // --- chuva forte (próxima hora) ---
       const mm = data?.hourly?.[0]?.rain?.["1h"] ?? 0;
       if (mm >= THRESHOLD_MM) {
-        // Mensagem M1 (curta e direta)
         const text =
           `🌧️ Chuva forte em <b>${c.name.toUpperCase()}</b>\n` +
-          `~${mm} mm/h na próxima hora`;
-        alerts.push(text);
+          `~${fmtMM(mm)} mm/h na próxima hora`;
+        rainMsgs.push(text);
+      }
+
+      // --- alertas oficiais (enviar todos) ---
+      if (Array.isArray(data.alerts)) {
+        for (const a of data.alerts) {
+          const endTxt = fmtHour(a.end || a.expires, data.timezone);
+          const header = `🚨 ALERTA OFICIAL — ${c.name.toUpperCase()}`;
+          const body = a.event || "Weather alert";
+          const validity = endTxt ? `\nVálido até: ${endTxt}` : "";
+          officialMsgs.push(`${header}\n${body}${validity}`);
+        }
       }
     } catch (e) {
       console.log(`Erro em ${c.name}:`, e.message);
     }
-
-    // delay leve entre chamadas de API pra evitar pico
-    await sleep(500);
+    await sleep(API_CALL_DELAY_MS);
   }
 
-  // envia com delay entre cada alerta (P3 = C, P4 = 5s)
-  for (const msg of alerts) {
+  // Envio na ordem definida: 1) chuva forte, 2) alertas oficiais
+  for (const msg of rainMsgs) {
     await sendTelegramHTML(msg);
-    await sleep(DELAY_MS);
+    await sleep(SEND_DELAY_MS);
+  }
+  for (const msg of officialMsgs) {
+    await sendTelegramHTML(msg);
+    await sleep(SEND_DELAY_MS);
   }
 
-  console.log(`Finalizado. Alertas enviados: ${alerts.length}`);
+  console.log(`Enviadas: chuva=${rainMsgs.length}, oficiais=${officialMsgs.length}`);
 }
 
 main();
