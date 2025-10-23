@@ -1,17 +1,11 @@
-// bot.js — produção (Node 18, ESM, GitHub Actions)
-// Requer Secrets: TELEGRAM_BOT_TOKEN, OPENWEATHER_KEY
-// Envia: (1) chuva >= 10 mm/h (M1)  (2) alertas oficiais (O3 com validade)
-// Ordem: 1) chuva forte  2) alertas oficiais
-// Anti-flood: delay 5s entre mensagens
-// Daily "Sem alertas": somente às 22:00 BRT (~01:00 UTC) SE nada for detectado
-
+// bot.js — DIAGNÓSTICO (mostra mm/h e alerts[] por cidade)
+// Requer TELEGRAM_BOT_TOKEN e OPENWEATHER_KEY nos Secrets
 import fetch from "node-fetch";
 
-// ===== CONFIG =====
 const CHAT_ID = -1003065918727;   // grupo
-const THRESHOLD_MM = 10;          // chuva forte
-const SEND_DELAY_MS = 5000;       // 5s
-const API_CALL_DELAY_MS = 500;    // 0.5s entre chamadas
+const THRESHOLD_MM = 10;
+const SEND_DELAY_MS = 5000;
+const API_CALL_DELAY_MS = 500;
 
 const CITIES = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
@@ -43,70 +37,92 @@ const CITIES = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
-// ===== UTILS =====
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function sendTelegramHTML(text) {
-  const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
-  });
-  const data = await resp.json();
-  if (!data.ok) console.log("ERRO TELEGRAM:", data);
-  return data;
-}
 
 function oneCallUrl(lat, lon) {
   return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 }
+function fmtMM(mm){ const n=Number(mm??0); return Number.isFinite(n)?(n%1===0?String(n):n.toFixed(1)):"0"; }
+function fmtHour(ts){ if(!ts)return""; const d=new Date(ts*1000); return d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",hour12:false}); }
 
-function fmtMM(mm) {
-  const n = Number(mm ?? 0);
-  return Number.isFinite(n) ? (n % 1 === 0 ? String(n) : n.toFixed(1)) : "0";
-}
-
-function fmtHour(tsSec) {
-  if (!tsSec) return null;
-  const d = new Date(tsSec * 1000);
-  // mostra horário local de Brasília aproximando (UTC-3)
-  return new Date(d.getTime() - 3 * 60 * 60 * 1000).toLocaleTimeString("pt-BR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
+async function sendTelegramHTML(text) {
+  const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+  const resp = await fetch(url, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode:"HTML" })
   });
+  const data = await resp.json();
+  if(!data.ok) console.log("ERRO TELEGRAM:", data);
+  return data;
 }
 
-function isDailySummaryHourUTC() {
-  // 22:00 BRT ≈ 01:00 UTC
-  const h = new Date().getUTCHours();
-  return h === 1;
-}
-
-// ===== MAIN =====
-async function main() {
-  if (!TOKEN) {
-    console.log("ERRO: TELEGRAM_BOT_TOKEN ausente.");
-    process.exit(1);
-  }
-  if (!OPENWEATHER_KEY) {
-    console.log("ERRO: OPENWEATHER_KEY ausente.");
-    process.exit(1);
+export default async () => {
+  if (!TOKEN || !OPENWEATHER_KEY) {
+    console.log("Secrets ausentes."); 
+    return;
   }
 
   const rainMsgs = [];
   const officialMsgs = [];
+  const diag = [];
 
   for (const c of CITIES) {
     try {
       const r = await fetch(oneCallUrl(c.lat, c.lon));
+      const status = r.status;
       if (!r.ok) {
-        console.log(`OneCall falhou em ${c.name}: HTTP ${r.status}`);
+        diag.push(`${c.uf}-${c.name}: HTTP ${status}`);
         await sleep(API_CALL_DELAY_MS);
+        continue;
+      }
+      const data = await r.json();
+
+      const mm = data?.hourly?.[0]?.rain?.["1h"] ?? 0;
+      const alerts = Array.isArray(data.alerts) ? data.alerts.length : 0;
+
+      // acumula diagnósticos
+      const lastAlertEnd = (Array.isArray(data.alerts) && data.alerts[0]?.end) ? `, end ${fmtHour(data.alerts[0].end)}` : "";
+      diag.push(`${c.uf}-${c.name}: ${fmtMM(mm)} mm/h, alerts=${alerts}${lastAlertEnd}`);
+
+      // regras normais
+      if (mm >= THRESHOLD_MM) {
+        rainMsgs.push(`🌧️ Chuva forte em <b>${c.name.toUpperCase()}</b>\n~${fmtMM(mm)} mm/h na próxima hora`);
+      }
+      if (Array.isArray(data.alerts)) {
+        for (const a of data.alerts) {
+          const endTxt = fmtHour(a.end || a.expires);
+          const header = `🚨 ALERTA OFICIAL — ${c.name.toUpperCase()}`;
+          const body = a.event || "Weather alert";
+          const validity = endTxt ? `\nVálido até: ${endTxt}` : "";
+          officialMsgs.push(`${header}\n${body}${validity}`);
+        }
+      }
+    } catch (e) {
+      diag.push(`${c.uf}-${c.name}: ERRO ${e.message}`);
+    }
+    await sleep(API_CALL_DELAY_MS);
+  }
+
+  // Envia o que tiver de fato
+  let sent = 0;
+  for (const m of rainMsgs) { await sendTelegramHTML(m); await sleep(SEND_DELAY_MS); sent++; }
+  for (const m of officialMsgs) { await sendTelegramHTML(m); await sleep(SEND_DELAY_MS); sent++; }
+
+  // Envia RESUMO TÉCNICO desta execução (sempre), pra entendermos o que a API retornou
+  const chunkSize = 3500; // HTML do Telegram tem limite ~4096
+  const full = `<b>Diagnóstico OneCall</b>\n<pre>${diag.join('\n')}</pre>\nEnviadas agora: chuva=${rainMsgs.length}, oficiais=${officialMsgs.length}`;
+  // quebra se ficar grande demais
+  for (let i=0; i<full.length; i+=chunkSize) {
+    const part = full.slice(i, i+chunkSize);
+    await sendTelegramHTML(part);
+    await sleep(1000);
+  }
+
+  return `diag: ${diag.length} cidades, enviados=${sent}`;
+};        await sleep(API_CALL_DELAY_MS);
         continue;
       }
       const data = await r.json();
