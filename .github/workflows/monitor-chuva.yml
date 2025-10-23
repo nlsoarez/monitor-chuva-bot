@@ -2,8 +2,8 @@ name: Monitor de Chuvas
 
 on:
   schedule:
-    - cron: "0 * * * *"   # roda no início de toda hora
-  workflow_dispatch:       # permite rodar manualmente
+    - cron: "0 */2 * * *"   # a cada 2 horas (UTC)
+  workflow_dispatch:         # permite rodar manualmente
 
 jobs:
   run-bot:
