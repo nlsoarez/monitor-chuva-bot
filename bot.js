@@ -1,17 +1,19 @@
-// bot.js — Forecast 2.5 (grátis) + Alertas detalhados + DIAGNÓSTICO sempre
+// bot.js — INMET + OpenWeather Forecast (ESM)
 // Requer secrets: TELEGRAM_BOT_TOKEN, OPENWEATHER_KEY
+// Ordem de envio: 1) INMET (oficial)  2) CHUVA (previsão forte)
+// Resumo diário: envia "Sem alertas" 1x/dia na execução mais próxima de 22:00 BRT (usaremos 23:00 BRT pela cadência de 2h)
 
 import fetch from "node-fetch";
 
-// ===== CONFIG =====
-const CHAT_ID = -1003065918727;       // grupo
-const THRESHOLD_MM_PER_HOUR = 10;     // limite para alerta
-const FORECAST_HOURS = 6;             // horizonte (duas janelas de 3h)
-const SEND_DELAY_MS = 5000;           // delay entre mensagens (alertas e blocos de diagnóstico)
-const API_CALL_DELAY_MS = 400;        // leve intervalo entre chamadas de API
-const DIAG_BLOCK_SIZE = 10;           // até 10 cidades por mensagem de diagnóstico
+// ===== CONFIG GERAL =====
+const CHAT_ID = -1003065918727;          // id do grupo
+const THRESHOLD_MM_PER_HOUR = 10;        // limite para alerta de chuva
+const FORECAST_HOURS = 6;                // horizonte de previsão (próximas 6h)
+const SEND_DELAY_MS = 5000;              // delay entre mensagens (evita flood)
+const API_CALL_DELAY_MS = 400;           // pausa pequena entre chamadas
+const DAILY_SUMMARY_BRT_HOUR = 23;       // execução mais próxima de 22:00 BRT (cron a cada 2h → 23:00 BRT)
 
-// Capitais
+// ===== CAPITAIS (chuva prevista por capitais) =====
 const CITIES = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
   { uf:"AL", name:"Maceió",lat:-9.64985,lon:-35.70895},
@@ -42,18 +44,31 @@ const CITIES = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
-// ===== HELPERS =====
+// ===== SECRETS =====
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
 
+// ===== HELPERS =====
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const toBRTime = (tsSec) =>
-  new Date(tsSec * 1000).toLocaleTimeString("pt-BR", {
+function toBRTime(tsSec) {
+  return new Date(tsSec * 1000).toLocaleTimeString("pt-BR", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function nowBrtHour() {
+  // Aproximação estática BRT = UTC-3
+  const now = new Date();
+  const brtMs = now.getTime() - 3 * 60 * 60 * 1000;
+  return new Date(brtMs).getHours();
+}
+
+function fmtMM(n) {
+  return Number.isFinite(n) ? (n % 1 === 0 ? String(n) : n.toFixed(1)) : "0";
+}
 
 function forecastUrl(lat, lon) {
   return `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
@@ -66,39 +81,94 @@ async function sendTelegramHTML(text) {
     body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
   });
   const data = await resp.json();
-  if (!data.ok) console.log("ERRO TELEGRAM:", data);
+  if (!data?.ok) console.log("ERRO TELEGRAM:", data);
   return data;
 }
 
+// ===== INMET =====
+async function fetchINMETAlerts() {
+  try {
+    const r = await fetch("https://apiprevmet3.inmet.gov.br/alerts");
+    if (!r.ok) {
+      console.log("INMET HTTP", r.status);
+      return [];
+    }
+    const data = await r.json();
+    if (!Array.isArray(data)) return [];
+
+    // Filtra níveis: apenas "Perigo" e "Grande Perigo"
+    const allowed = new Set(["Perigo", "Grande Perigo"]);
+    const filtered = data.filter((a) => allowed.has(a?.nivel));
+
+    // Agrupa por estado (1 mensagem por estado)
+    const byUF = new Map();
+    for (const a of filtered) {
+      const uf = (a?.estado || "").toUpperCase();
+      if (!uf) continue;
+      if (!byUF.has(uf)) {
+        byUF.set(uf, {
+          uf,
+          count: 0,
+          // contar por severidade
+          danger: 0,       // Perigo
+          greatDanger: 0,  // Grande Perigo
+          earliestStart: null,
+          latestEnd: null,
+        });
+      }
+      const entry = byUF.get(uf);
+      entry.count += 1;
+      if (a.nivel === "Perigo") entry.danger += 1;
+      else if (a.nivel === "Grande Perigo") entry.greatDanger += 1;
+
+      const start = a?.inicio ? Date.parse(a.inicio) : null;
+      const end = a?.fim ? Date.parse(a.fim) : null;
+      if (start && (!entry.earliestStart || start < entry.earliestStart)) entry.earliestStart = start;
+      if (end && (!entry.latestEnd || end > entry.latestEnd)) entry.latestEnd = end;
+    }
+
+    // Gera mensagens por UF (formato oficial com ⚠️)
+    const messages = [];
+    for (const [, st] of byUF) {
+      const startTxt = st.earliestStart
+        ? new Date(st.earliestStart).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false })
+        : "-";
+      const endTxt = st.latestEnd
+        ? new Date(st.latestEnd).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false })
+        : "-";
+
+      const levels =
+        st.greatDanger > 0 && st.danger > 0
+          ? `Grande Perigo (${st.greatDanger}) / Perigo (${st.danger})`
+          : st.greatDanger > 0
+          ? `Grande Perigo (${st.greatDanger})`
+          : `Perigo (${st.danger})`;
+
+      const msg =
+        `⚠️ <b>ALERTA OFICIAL — INMET</b>\n` +
+        `<b>ESTADO:</b> ${st.uf}\n` +
+        `<b>Municípios sob alerta:</b> ${st.count}\n` +
+        `<b>Nível(is):</b> ${levels}\n` +
+        `<b>Vigência aprox.:</b> ${startTxt}–${endTxt}`;
+      messages.push(msg);
+    }
+
+    return messages;
+  } catch (e) {
+    console.log("Erro INMET:", e.message);
+    return [];
+  }
+}
+
+// ===== CHUVA (OpenWeather Forecast) =====
 function mmhFromRain3h(rain3h) {
   const mm3h = Number(rain3h ?? 0);
   if (!Number.isFinite(mm3h)) return 0;
   return mm3h / 3;
 }
 
-function fmtMM(n) {
-  return Number.isFinite(n) ? (n % 1 === 0 ? String(n) : n.toFixed(1)) : "0";
-}
-
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-// ===== MAIN =====
-async function main() {
-  if (!TOKEN) {
-    console.log("ERRO: TELEGRAM_BOT_TOKEN ausente.");
-    process.exit(1);
-  }
-  if (!OPENWEATHER_KEY) {
-    console.log("ERRO: OPENWEATHER_KEY ausente.");
-    process.exit(1);
-  }
-
-  const alerts = [];         // {city, maxMMh, start, end}
-  const diagLines = [];      // linhas de diagnóstico por cidade (formato estilo alerta)
+async function fetchRainAlerts() {
+  const alerts = [];
   const now = Date.now() / 1000;
   const horizon = now + FORECAST_HOURS * 3600;
 
@@ -107,14 +177,12 @@ async function main() {
       const r = await fetch(forecastUrl(c.lat, c.lon));
       if (!r.ok) {
         console.log(`Forecast falhou em ${c.name}: HTTP ${r.status}`);
-        diagLines.push(`🚫 ${c.uf} — ${c.name}: erro HTTP ${r.status}`);
         await sleep(API_CALL_DELAY_MS);
         continue;
       }
       const data = await r.json();
       const list = Array.isArray(data?.list) ? data.list : [];
 
-      // filtra próximas 6h (entradas de 3h)
       const next = list.filter((it) => it.dt >= now && it.dt <= horizon);
 
       let maxMMh = 0;
@@ -131,44 +199,64 @@ async function main() {
       if (best && maxMMh >= THRESHOLD_MM_PER_HOUR) {
         const start = toBRTime(best.dt);
         const end = toBRTime(best.dt + 3 * 3600);
-        alerts.push({ city: c.name, uf: c.uf, maxMMh, start, end });
-
-        // linha de diagnóstico para alerta real
-        diagLines.push(
-          `🌧️ ${c.name.toUpperCase()} — pico previsto ${fmtMM(maxMMh)} mm/h (${start}–${end})\n` +
-          `➡️ ALERTA DISPARADO`
-        );
-      } else {
-        // diagnóstico sem chuva forte
-        diagLines.push(`☀️ ${c.name.toUpperCase()} — sem chuva forte prevista`);
+        const msg =
+          `🌧️ <b>ALERTA DE CHUVA FORTE — ${c.name.toUpperCase()}</b>\n` +
+          `Volume previsto: <b>~${fmtMM(maxMMh)} mm/h</b>\n` +
+          `Janela estimada: <b>${start}–${end}</b>\n` +
+          `Fique atento a possíveis alagamentos.`;
+        alerts.push(msg);
       }
     } catch (e) {
       console.log(`Erro em ${c.name}:`, e.message);
-      diagLines.push(`🚫 ${c.name.toUpperCase()} — erro: ${e.message}`);
     }
-
     await sleep(API_CALL_DELAY_MS);
   }
 
-  // 1) Envia ALERTAS detalhados (AR2) primeiro
-  for (const a of alerts) {
-    const msg =
-      `🌧️ <b>ALERTA DE CHUVA FORTE — ${a.city.toUpperCase()}</b>\n` +
-      `Volume previsto: <b>~${fmtMM(a.maxMMh)} mm/h</b>\n` +
-      `Janela estimada: <b>${a.start}–${a.end}</b>\n` +
-      `Fique atento a possíveis alagamentos.`;
-    await sendTelegramHTML(msg);
-    await sleep(SEND_DELAY_MS);
+  return alerts;
+}
+
+// ===== RESUMO DIÁRIO =====
+function shouldSendDailySummary() {
+  // Janela mais próxima de 22:00 BRT considerando cron de 2h → usamos 23:00 BRT
+  return nowBrtHour() === DAILY_SUMMARY_BRT_HOUR;
+}
+
+// ===== MAIN =====
+async function main() {
+  if (!TOKEN) {
+    console.log("ERRO: TELEGRAM_BOT_TOKEN ausente.");
+    process.exit(1);
+  }
+  if (!OPENWEATHER_KEY) {
+    console.log("ERRO: OPENWEATHER_KEY ausente.");
+    process.exit(1);
   }
 
-  // 2) Envia DIAGNÓSTICO completo sempre (DIA1), em blocos de 10 linhas com delay entre blocos
-  const blocks = chunk(diagLines, DIAG_BLOCK_SIZE);
-  for (const b of blocks) {
-    await sendTelegramHTML(b.join("\n\n"));
+  let sentAny = false;
+
+  // 1) INMET primeiro
+  const inmetMessages = await fetchINMETAlerts();
+  for (const m of inmetMessages) {
+    await sendTelegramHTML(m);
     await sleep(SEND_DELAY_MS);
+    sentAny = true;
   }
 
-  console.log(`Execução OK. Alertas: ${alerts.length}. Blocos diagnóstico: ${blocks.length}`);
+  // 2) CHUVA (previsão forte nas capitais)
+  const rainMessages = await fetchRainAlerts();
+  for (const m of rainMessages) {
+    await sendTelegramHTML(m);
+    await sleep(SEND_DELAY_MS);
+    sentAny = true;
+  }
+
+  // 3) Resumo diário (independente de ter havido alertas no dia, R1)
+  if (!sentAny && shouldSendDailySummary()) {
+    await sendTelegramHTML("✅ Sem alertas no momento");
+    sentAny = true;
+  }
+
+  console.log(`Execução finalizada. INMET=${inmetMessages.length}, CHUVA=${rainMessages.length}, DAILY=${!sentAny ? 1 : 0}`);
 }
 
 main();
