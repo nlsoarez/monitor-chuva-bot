@@ -40,8 +40,7 @@ const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
 const sleep = (ms) => new Promise(r => setTimeout(r,ms));
 
 function api(lat, lon){
-  return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
-}
+  return `https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 function fmt(mm){
   const n = Number(mm??0);
   return Number.isFinite(n)? (n%1===0?String(n):n.toFixed(1)):"0";
