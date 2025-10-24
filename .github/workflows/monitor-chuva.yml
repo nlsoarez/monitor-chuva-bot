@@ -3,25 +3,13 @@ name: Weather Alert Bot
 on:
   schedule:
     - cron: "0 */2 * * *"   # Every 2 hours
-    - cron: "0 22 * * *"     # Daily at 22:00 UTC (19:00 BRT) - backup time
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Run mode'
-        required: false
-        default: 'normal'
-        type: choice
-        options:
-        - normal
-        - health-check
-        - continuous
+    - cron: "0 22 * * *"     # Daily at 22:00 UTC (19:00 BRT)
+  workflow_dispatch:         # Manual trigger
 
 env:
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
   CHAT_ID: ${{ secrets.CHAT_ID }}
-  RAIN_THRESHOLD: ${{ vars.RAIN_THRESHOLD || '10' }}
-  FORECAST_HOURS: ${{ vars.FORECAST_HOURS || '6' }}
 
 jobs:
   run-bot:
@@ -29,10 +17,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
@@ -41,35 +29,23 @@ jobs:
         run: npm ci
 
       - name: Restore geo cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: geo_cache.json
-          key: ${{ runner.os }}-geo-cache-${{ github.ref }}-${{ hashFiles('bot.js') }}
+          key: ${{ runner.os }}-geo-cache-${{ hashFiles('bot.js') }}
           restore-keys: |
-            ${{ runner.os }}-geo-cache-${{ github.ref }}-
             ${{ runner.os }}-geo-cache-
 
-      - name: Health Check
-        if: github.event.inputs.mode == 'health-check'
-        run: npm run health
+      - name: Run bot
+        run: node bot.js
 
-      - name: Run Continuous Mode
-        if: github.event.inputs.mode == 'continuous'
-        run: npm run continuous
-        timeout-minutes: 120  # 2 hours max for continuous mode
-
-      - name: Run Normal Mode
-        if: github.event.inputs.mode != 'continuous' && github.event.inputs.mode != 'health-check'
-        run: npm start
-
-      - name: Upload logs on failure
+      - name: Upload cache on failure
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: error-logs
-          path: |
-            geo_cache.json
-          retention-days: 7
+          name: geo-cache-failure
+          path: geo_cache.json
+          retention-days: 3
 
   notify-failure:
     name: Notify on Failure
@@ -78,7 +54,7 @@ jobs:
     if: failure() && needs.run-bot.result == 'failure'
     
     steps:
-      - name: Send Telegram notification
+      - name: Send failure notification
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
           -d chat_id="${{ secrets.CHAT_ID }}" \
