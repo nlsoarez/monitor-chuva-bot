@@ -1,20 +1,23 @@
-// bot.js — INMET + OpenWeather Forecast (ESM)
+// bot.js — INMET + OpenWeather Forecast (ESM) + CACHE DE GEOCODING
 // Requer secrets: TELEGRAM_BOT_TOKEN, OPENWEATHER_KEY
-// Ordem de envio: 1) INMET (oficial)  2) CHUVA (previsão forte)
-// Resumo diário: envia "Sem alertas" 1x/dia na execução mais próxima de 22:00 BRT (usaremos 23:00 BRT pela cadência de 2h)
+// Resumo diário: às 22:00 BRT (01:00 UTC) — só envia “Sem alertas” se NÃO houver alertas
+// Chuva: CAPITAIS + MUNICÍPIOS do INMET (com cache de coordenadas em geo_cache.json)
 
 import fetch from "node-fetch";
+import fs from "fs";
 
-// ===== CONFIG GERAL =====
-const CHAT_ID = -1003065918727;          // id do grupo
-const THRESHOLD_MM_PER_HOUR = 10;        // limite para alerta de chuva
-const FORECAST_HOURS = 6;                // horizonte de previsão (próximas 6h)
-const SEND_DELAY_MS = 5000;              // delay entre mensagens (evita flood)
-const API_CALL_DELAY_MS = 400;           // pausa pequena entre chamadas
-const DAILY_SUMMARY_BRT_HOUR = 23;       // execução mais próxima de 22:00 BRT (cron a cada 2h → 23:00 BRT)
+// ===== CONFIG =====
+const CHAT_ID = -1003065918727;
+const THRESHOLD_MM_PER_HOUR = 10;
+const FORECAST_HOURS = 6;
+const SEND_DELAY_MS = 5000;
+const API_CALL_DELAY_MS = 400;
+const GEOCODE_CALL_DELAY_MS = 300;
+const DAILY_SUMMARY_BRT_HOUR = 22;
+const CACHE_FILE = "./geo_cache.json";
 
-// ===== CAPITAIS (chuva prevista por capitais) =====
-const CITIES = [
+// ===== BASE =====
+const CAPITALS = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
   { uf:"AL", name:"Maceió",lat:-9.64985,lon:-35.70895},
   { uf:"AP", name:"Macapá",lat:0.03493,lon:-51.06940},
@@ -44,26 +47,14 @@ const CITIES = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
-// ===== SECRETS =====
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
 
-// ===== HELPERS =====
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function toBRTime(tsSec) {
-  return new Date(tsSec * 1000).toLocaleTimeString("pt-BR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
-
 function nowBrtHour() {
-  // Aproximação estática BRT = UTC-3
   const now = new Date();
-  const brtMs = now.getTime() - 3 * 60 * 60 * 1000;
-  return new Date(brtMs).getHours();
+  return new Date(now.getTime() - 3 * 60 * 60 * 1000).getHours();
 }
 
 function fmtMM(n) {
@@ -74,189 +65,154 @@ function forecastUrl(lat, lon) {
   return `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
 }
 
+function geocodeUrl(city, uf) {
+  const q = encodeURIComponent(`${city}, ${uf}, BR`);
+  return `https://api.openweathermap.org/geo/1.0/direct?q=${q}&limit=1&appid=${OPENWEATHER_KEY}`;
+}
+
 async function sendTelegramHTML(text) {
-  const resp = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+  await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
   });
-  const data = await resp.json();
-  if (!data?.ok) console.log("ERRO TELEGRAM:", data);
-  return data;
+}
+
+// ===== GEOCODE CACHE =====
+function loadCache() {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+    }
+  } catch {}
+  return {};
+}
+
+function saveCache(cache) {
+  try {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+  } catch (e) {
+    console.log("Erro ao salvar cache:", e.message);
+  }
+}
+
+async function geocodeCity(city, uf, cache) {
+  const key = `${city.toLowerCase()}|${uf}`;
+  if (cache[key]) return cache[key];
+  try {
+    const r = await fetch(geocodeUrl(city, uf));
+    if (!r.ok) return null;
+    const arr = await r.json();
+    if (Array.isArray(arr) && arr[0]?.lat) {
+      const geo = { lat: arr[0].lat, lon: arr[0].lon };
+      cache[key] = geo;
+      saveCache(cache);
+      await sleep(GEOCODE_CALL_DELAY_MS);
+      return geo;
+    }
+  } catch {}
+  return null;
 }
 
 // ===== INMET =====
 async function fetchINMETAlerts() {
-  try {
-    const r = await fetch("https://apiprevmet3.inmet.gov.br/alerts");
-    if (!r.ok) {
-      console.log("INMET HTTP", r.status);
-      return [];
-    }
-    const data = await r.json();
-    if (!Array.isArray(data)) return [];
-
-    // Filtra níveis: apenas "Perigo" e "Grande Perigo"
-    const allowed = new Set(["Perigo", "Grande Perigo"]);
-    const filtered = data.filter((a) => allowed.has(a?.nivel));
-
-    // Agrupa por estado (1 mensagem por estado)
-    const byUF = new Map();
-    for (const a of filtered) {
-      const uf = (a?.estado || "").toUpperCase();
-      if (!uf) continue;
-      if (!byUF.has(uf)) {
-        byUF.set(uf, {
-          uf,
-          count: 0,
-          // contar por severidade
-          danger: 0,       // Perigo
-          greatDanger: 0,  // Grande Perigo
-          earliestStart: null,
-          latestEnd: null,
-        });
-      }
-      const entry = byUF.get(uf);
-      entry.count += 1;
-      if (a.nivel === "Perigo") entry.danger += 1;
-      else if (a.nivel === "Grande Perigo") entry.greatDanger += 1;
-
-      const start = a?.inicio ? Date.parse(a.inicio) : null;
-      const end = a?.fim ? Date.parse(a.fim) : null;
-      if (start && (!entry.earliestStart || start < entry.earliestStart)) entry.earliestStart = start;
-      if (end && (!entry.latestEnd || end > entry.latestEnd)) entry.latestEnd = end;
-    }
-
-    // Gera mensagens por UF (formato oficial com ⚠️)
-    const messages = [];
-    for (const [, st] of byUF) {
-      const startTxt = st.earliestStart
-        ? new Date(st.earliestStart).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false })
-        : "-";
-      const endTxt = st.latestEnd
-        ? new Date(st.latestEnd).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false })
-        : "-";
-
-      const levels =
-        st.greatDanger > 0 && st.danger > 0
-          ? `Grande Perigo (${st.greatDanger}) / Perigo (${st.danger})`
-          : st.greatDanger > 0
-          ? `Grande Perigo (${st.greatDanger})`
-          : `Perigo (${st.danger})`;
-
-      const msg =
-        `⚠️ <b>ALERTA OFICIAL — INMET</b>\n` +
-        `<b>ESTADO:</b> ${st.uf}\n` +
-        `<b>Municípios sob alerta:</b> ${st.count}\n` +
-        `<b>Nível(is):</b> ${levels}\n` +
-        `<b>Vigência aprox.:</b> ${startTxt}–${endTxt}`;
-      messages.push(msg);
-    }
-
-    return messages;
-  } catch (e) {
-    console.log("Erro INMET:", e.message);
-    return [];
-  }
+  const r = await fetch("https://apiprevmet3.inmet.gov.br/alerts");
+  if (!r.ok) return [];
+  const data = await r.json();
+  return Array.isArray(data) ? data : [];
 }
 
-// ===== CHUVA (OpenWeather Forecast) =====
-function mmhFromRain3h(rain3h) {
-  const mm3h = Number(rain3h ?? 0);
-  if (!Number.isFinite(mm3h)) return 0;
-  return mm3h / 3;
-}
-
-async function fetchRainAlerts() {
+// ===== CHUVA =====
+async function fetchRainAlerts(targets) {
   const alerts = [];
   const now = Date.now() / 1000;
   const horizon = now + FORECAST_HOURS * 3600;
-
-  for (const c of CITIES) {
+  for (const c of targets) {
     try {
       const r = await fetch(forecastUrl(c.lat, c.lon));
-      if (!r.ok) {
-        console.log(`Forecast falhou em ${c.name}: HTTP ${r.status}`);
-        await sleep(API_CALL_DELAY_MS);
-        continue;
-      }
+      if (!r.ok) continue;
       const data = await r.json();
       const list = Array.isArray(data?.list) ? data.list : [];
-
       const next = list.filter((it) => it.dt >= now && it.dt <= horizon);
-
       let maxMMh = 0;
       let best = null;
       for (const it of next) {
         const mm3h = it?.rain?.["3h"] ?? 0;
-        const mmh = mmhFromRain3h(mm3h);
+        const mmh = mm3h / 3;
         if (mmh > maxMMh) {
           maxMMh = mmh;
           best = it;
         }
       }
-
       if (best && maxMMh >= THRESHOLD_MM_PER_HOUR) {
-        const start = toBRTime(best.dt);
-        const end = toBRTime(best.dt + 3 * 3600);
         const msg =
           `🌧️ <b>ALERTA DE CHUVA FORTE — ${c.name.toUpperCase()}</b>\n` +
           `Volume previsto: <b>~${fmtMM(maxMMh)} mm/h</b>\n` +
-          `Janela estimada: <b>${start}–${end}</b>\n` +
-          `Fique atento a possíveis alagamentos.`;
+          `Janela: ${new Date(best.dt * 1000).toLocaleTimeString("pt-BR", {hour:"2-digit",minute:"2-digit"})}–${new Date((best.dt + 10800) * 1000).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}`;
         alerts.push(msg);
       }
-    } catch (e) {
-      console.log(`Erro em ${c.name}:`, e.message);
-    }
+    } catch {}
     await sleep(API_CALL_DELAY_MS);
   }
-
   return alerts;
-}
-
-// ===== RESUMO DIÁRIO =====
-function shouldSendDailySummary() {
-  // Janela mais próxima de 22:00 BRT considerando cron de 2h → usamos 23:00 BRT
-  return nowBrtHour() === DAILY_SUMMARY_BRT_HOUR;
 }
 
 // ===== MAIN =====
 async function main() {
-  if (!TOKEN) {
-    console.log("ERRO: TELEGRAM_BOT_TOKEN ausente.");
-    process.exit(1);
-  }
-  if (!OPENWEATHER_KEY) {
-    console.log("ERRO: OPENWEATHER_KEY ausente.");
-    process.exit(1);
-  }
-
+  const cache = loadCache();
   let sentAny = false;
 
-  // 1) INMET primeiro
-  const inmetMessages = await fetchINMETAlerts();
-  for (const m of inmetMessages) {
+  // INMET
+  const all = await fetchINMETAlerts();
+  const allowed = ["Perigo", "Grande Perigo"];
+  const byUF = new Map();
+  const cities = [];
+
+  for (const a of all) {
+    if (!allowed.includes(a.nivel)) continue;
+    const uf = a.estado?.toUpperCase?.() || "";
+    if (!uf) continue;
+    if (!byUF.has(uf)) byUF.set(uf, []);
+    byUF.get(uf).push(a);
+    if (a.municipio) cities.push({ name: a.municipio, uf });
+  }
+
+  for (const [uf, list] of byUF) {
+    const msg =
+      `⚠️ <b>ALERTA OFICIAL — INMET</b>\n` +
+      `<b>ESTADO:</b> ${uf}\n` +
+      `<b>Municípios sob alerta:</b> ${list.length}\n` +
+      `<b>Nível(is):</b> ${[...new Set(list.map(a=>a.nivel))].join(", ")}`;
+    await sendTelegramHTML(msg);
+    await sleep(SEND_DELAY_MS);
+    sentAny = true;
+  }
+
+  // MONTAR ALVOS
+  const targets = [...CAPITALS];
+  const seen = new Set(targets.map((c)=>`${c.name.toLowerCase()}|${c.uf}`));
+
+  for (const m of cities) {
+    const key = `${m.name.toLowerCase()}|${m.uf}`;
+    if (seen.has(key)) continue;
+    const geo = await geocodeCity(m.name, m.uf, cache);
+    if (geo) targets.push({ name:m.name, uf:m.uf, ...geo });
+  }
+
+  // CHUVA
+  const rain = await fetchRainAlerts(targets);
+  for (const m of rain) {
     await sendTelegramHTML(m);
     await sleep(SEND_DELAY_MS);
     sentAny = true;
   }
 
-  // 2) CHUVA (previsão forte nas capitais)
-  const rainMessages = await fetchRainAlerts();
-  for (const m of rainMessages) {
-    await sendTelegramHTML(m);
-    await sleep(SEND_DELAY_MS);
-    sentAny = true;
-  }
-
-  // 3) Resumo diário (independente de ter havido alertas no dia, R1)
-  if (!sentAny && shouldSendDailySummary()) {
+  // SEM ALERTAS
+  if (!sentAny && nowBrtHour() === DAILY_SUMMARY_BRT_HOUR) {
     await sendTelegramHTML("✅ Sem alertas no momento");
-    sentAny = true;
   }
 
-  console.log(`Execução finalizada. INMET=${inmetMessages.length}, CHUVA=${rainMessages.length}, DAILY=${!sentAny ? 1 : 0}`);
+  console.log(`Execução: INMET=${byUF.size}, CHUVA=${rain.length}, sentAny=${sentAny}`);
 }
 
 main();
