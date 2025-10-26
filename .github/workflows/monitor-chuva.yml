@@ -1,61 +1,29 @@
-name: Weather Alert Bot
+name: Monitoramento de Chuvas
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # Every 2 hours
-    - cron: "0 22 * * *"     # Daily at 22:00 UTC (19:00 BRT)
-  workflow_dispatch:         # Manual trigger
-
-env:
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-  OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
-  CHAT_ID: ${{ secrets.CHAT_ID }}
+    - cron: "0 */2 * * *"   # roda de 2 em 2h (UTC)
+    - cron: "0 1 * * *"     # roda 01:00 UTC = ~22:00 BRT
+  workflow_dispatch:
 
 jobs:
-  run-bot:
+  monitor:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout código
+        uses: actions/checkout@v3
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Configura Node
+        uses: actions/setup-node@v3
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: 18
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Instalar dependências
+        run: npm install
 
-      - name: Restore geo cache
-        uses: actions/cache@v4
-        with:
-          path: geo_cache.json
-          key: ${{ runner.os }}-geo-cache-${{ hashFiles('bot.js') }}
-          restore-keys: |
-            ${{ runner.os }}-geo-cache-
-
-      - name: Run bot
+      - name: Executar bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
         run: node bot.js
-
-      - name: Upload cache on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: geo-cache-failure
-          path: geo_cache.json
-          retention-days: 3
-
-  notify-failure:
-    name: Notify on Failure
-    runs-on: ubuntu-latest
-    needs: [run-bot]
-    if: failure() && needs.run-bot.result == 'failure'
-    
-    steps:
-      - name: Send failure notification
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-          -d chat_id="${{ secrets.CHAT_ID }}" \
-          -d text="❌ Weather Alert Bot failed in GitHub Actions. Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
