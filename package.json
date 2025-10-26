@@ -1,28 +1,12 @@
 {
-  "name": "weather-alert-bot",
+  "name": "monitor-chuvas-br",
+  "version": "1.0.0",
   "type": "module",
-  "version": "2.0.0",
-  "description": "Bot de alertas meteorológicos para Telegram com INMET e OpenWeather",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
-    "continuous": "node bot.js --continuous",
-    "test": "node --check bot.js",
-    "health": "node -e \"import('./bot.js').then(m => m.healthCheck())\""
+    "start": "node bot.js"
   },
-  "keywords": [
-    "telegram",
-    "weather",
-    "alerts",
-    "inmet",
-    "openweather"
-  ],
-  "author": "Seu Nome",
-  "license": "MIT",
   "dependencies": {
-    "node-fetch": "^3.3.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "node-fetch": "^3.3.2"
   }
 }
