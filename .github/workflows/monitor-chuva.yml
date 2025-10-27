@@ -2,8 +2,9 @@ name: Monitoramento de Chuvas
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # roda de 2 em 2h (UTC)
-    - cron: "0 1 * * *"     # roda 01:00 UTC = ~22:00 BRT
+    - cron: "0 */2 * * *"      # a cada 2h (UTC)
+    - cron: "30 2 * * *"       # rodar HOJE às 23:30 BRT
+    - cron: "0 1 * * *"        # diário às 22:00 BRT (01:00 UTC)
   workflow_dispatch:
 
 jobs:
