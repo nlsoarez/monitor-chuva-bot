@@ -1,0 +1,42 @@
+name: Diagnóstico Diário 22h BRT
+
+on:
+  schedule:
+    - cron: "0 1 * * *"     # 01:00 UTC = ~22:00 BRT
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v3
+
+      - name: Configura Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Executar bot (resumo 22h)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+          RUN_MODE: "daily"         # <-- modo resumo diário
+        run: node bot.js
+
+      - name: Commit do estado (se mudou)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data/)" ]; then
+            git add data/
+            git commit -m "chore(state): roll daily state after 22h [ci skip]"
+            git push
+          fi
