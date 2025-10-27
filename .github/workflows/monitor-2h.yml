@@ -1,0 +1,42 @@
+name: Monitoramento 2h
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"   # A cada 2 horas (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write   # para commitar o estado em data/
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v3
+
+      - name: Configura Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Executar bot (monitor)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+          RUN_MODE: "monitor"       # <-- modo monitor
+        run: node bot.js
+
+      - name: Commit do estado (se mudou)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data/)" ]; then
+            git add data/
+            git commit -m "chore(state): update daily alert state [ci skip]"
+            git push
+          fi
