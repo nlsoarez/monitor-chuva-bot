@@ -1,23 +1,77 @@
-// bot.js — INMET + OpenWeather Forecast (ESM) + CACHE DE GEOCODING
-// Requer secrets: TELEGRAM_BOT_TOKEN, OPENWEATHER_KEY
-// Resumo diário: às 22:00 BRT (01:00 UTC) — só envia “Sem alertas” se NÃO houver alertas
-// Chuva: CAPITAIS + MUNICÍPIOS do INMET (com cache de coordenadas em geo_cache.json)
-
 import fetch from "node-fetch";
 import fs from "fs";
+import path from "path";
 
-// ===== CONFIG =====
-const CHAT_ID = -1003065918727;
-const THRESHOLD_MM_PER_HOUR = 10;
-const FORECAST_HOURS = 6;
-const SEND_DELAY_MS = 5000;
-const API_CALL_DELAY_MS = 400;
-const GEOCODE_CALL_DELAY_MS = 300;
-const DAILY_SUMMARY_BRT_HOUR = 22;
-const CACHE_FILE = "./geo_cache.json";
+const CHAT_ID = -1003065918727;              // seu grupo
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
+const RUN_MODE = process.env.RUN_MODE || "monitor"; // "monitor" (2h) | "daily" (22h)
 
-// ===== BASE =====
-const CAPITALS = [
+// ===== util =====
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const todayStr = () => new Date().toISOString().slice(0,10); // YYYY-MM-DD
+const dataDir = path.join(process.cwd(), "data");
+const stateFile = (d = todayStr()) => path.join(dataDir, `${d}.json`);
+
+function ensureDataDir(){
+  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+  if (!fs.existsSync(stateFile())) fs.writeFileSync(stateFile(), JSON.stringify({ cities: [], closed: false }, null, 2));
+}
+
+function loadState() {
+  ensureDataDir();
+  try {
+    return JSON.parse(fs.readFileSync(stateFile(), "utf-8"));
+  } catch {
+    return { cities: [], closed: false };
+  }
+}
+
+function saveState(st) {
+  ensureDataDir();
+  fs.writeFileSync(stateFile(), JSON.stringify(st, null, 2));
+}
+
+function resetTomorrow() {
+  // cria arquivo do próximo dia vazio (opcional)
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  const ymd = d.toISOString().slice(0,10);
+  const f = stateFile(ymd);
+  if (!fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({ cities: [], closed: false }, null, 2));
+}
+
+function addCityToday(cityName){
+  const st = loadState();
+  if (!st.cities.includes(cityName)) {
+    st.cities.push(cityName);
+    saveState(st);
+  }
+}
+
+function markClosed(){
+  const st = loadState();
+  st.closed = true;   // marca que o resumo foi emitido hoje
+  saveState(st);
+}
+
+// ===== Telegram =====
+async function tgSend(text, html = true){
+  const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      text,
+      parse_mode: html ? "HTML" : undefined,
+      disable_web_page_preview: true
+    })
+  });
+  return r.json();
+}
+
+// ===== Sua base de CIDADES (capitais) =====
+const CITIES = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
   { uf:"AL", name:"Maceió",lat:-9.64985,lon:-35.70895},
   { uf:"AP", name:"Macapá",lat:0.03493,lon:-51.06940},
@@ -47,172 +101,77 @@ const CAPITALS = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function nowBrtHour() {
-  const now = new Date();
-  return new Date(now.getTime() - 3 * 60 * 60 * 1000).getHours();
+// ===== APIs =====
+// Chuva horária via OpenWeather OneCall (precipitação na última hora)
+function owUrl(lat, lon){
+  return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br&exclude=minutely,daily`;
 }
 
-function fmtMM(n) {
-  return Number.isFinite(n) ? (n % 1 === 0 ? String(n) : n.toFixed(1)) : "0";
-}
+const THRESHOLD_MM = 10;
+const API_DELAY = 400;
 
-function forecastUrl(lat, lon) {
-  return `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br`;
-}
+async function monitorRun(){
+  const diag = [];
+  const toSend = [];
 
-function geocodeUrl(city, uf) {
-  const q = encodeURIComponent(`${city}, ${uf}, BR`);
-  return `https://api.openweathermap.org/geo/1.0/direct?q=${q}&limit=1&appid=${OPENWEATHER_KEY}`;
-}
-
-async function sendTelegramHTML(text) {
-  await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
-  });
-}
-
-// ===== GEOCODE CACHE =====
-function loadCache() {
-  try {
-    if (fs.existsSync(CACHE_FILE)) {
-      return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
-    }
-  } catch {}
-  return {};
-}
-
-function saveCache(cache) {
-  try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
-  } catch (e) {
-    console.log("Erro ao salvar cache:", e.message);
-  }
-}
-
-async function geocodeCity(city, uf, cache) {
-  const key = `${city.toLowerCase()}|${uf}`;
-  if (cache[key]) return cache[key];
-  try {
-    const r = await fetch(geocodeUrl(city, uf));
-    if (!r.ok) return null;
-    const arr = await r.json();
-    if (Array.isArray(arr) && arr[0]?.lat) {
-      const geo = { lat: arr[0].lat, lon: arr[0].lon };
-      cache[key] = geo;
-      saveCache(cache);
-      await sleep(GEOCODE_CALL_DELAY_MS);
-      return geo;
-    }
-  } catch {}
-  return null;
-}
-
-// ===== INMET =====
-async function fetchINMETAlerts() {
-  const r = await fetch("https://apiprevmet3.inmet.gov.br/alerts");
-  if (!r.ok) return [];
-  const data = await r.json();
-  return Array.isArray(data) ? data : [];
-}
-
-// ===== CHUVA =====
-async function fetchRainAlerts(targets) {
-  const alerts = [];
-  const now = Date.now() / 1000;
-  const horizon = now + FORECAST_HOURS * 3600;
-  for (const c of targets) {
-    try {
-      const r = await fetch(forecastUrl(c.lat, c.lon));
-      if (!r.ok) continue;
-      const data = await r.json();
-      const list = Array.isArray(data?.list) ? data.list : [];
-      const next = list.filter((it) => it.dt >= now && it.dt <= horizon);
-      let maxMMh = 0;
-      let best = null;
-      for (const it of next) {
-        const mm3h = it?.rain?.["3h"] ?? 0;
-        const mmh = mm3h / 3;
-        if (mmh > maxMMh) {
-          maxMMh = mmh;
-          best = it;
+  for (const c of CITIES){
+    try{
+      const r = await fetch(owUrl(c.lat, c.lon));
+      if (!r.ok) {
+        diag.push(`${c.uf}-${c.name}: HTTP ${r.status}`);
+      } else {
+        const d = await r.json();
+        const mm = d?.hourly?.[0]?.rain?.["1h"] ?? 0;
+        diag.push(`${c.uf}-${c.name}: ${mm ?? 0} mm/h`);
+        if (mm >= THRESHOLD_MM){
+          toSend.push(`🌧️ <b>${c.name.toUpperCase()}</b>\n~${mm.toFixed(1)} mm/h`);
+          addCityToday(c.name); // registra cidade com alerta de chuva
         }
       }
-      if (best && maxMMh >= THRESHOLD_MM_PER_HOUR) {
-        const msg =
-          `🌧️ <b>ALERTA DE CHUVA FORTE — ${c.name.toUpperCase()}</b>\n` +
-          `Volume previsto: <b>~${fmtMM(maxMMh)} mm/h</b>\n` +
-          `Janela: ${new Date(best.dt * 1000).toLocaleTimeString("pt-BR", {hour:"2-digit",minute:"2-digit"})}–${new Date((best.dt + 10800) * 1000).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}`;
-        alerts.push(msg);
-      }
-    } catch {}
-    await sleep(API_CALL_DELAY_MS);
+    } catch(e){
+      diag.push(`${c.uf}-${c.name}: ERRO ${e.message}`);
+    }
+    await sleep(API_DELAY);
   }
-  return alerts;
+
+  // envia alertas de chuva
+  for (const m of toSend) await tgSend(m);
+
+  // diagnóstico curto por debug (opcional desabilitar)
+  if (toSend.length === 0) {
+    // nada
+  }
+
+  return { diag, sent: toSend.length };
 }
 
-// ===== MAIN =====
-async function main() {
-  const cache = loadCache();
-  let sentAny = false;
+async function dailySummary(){
+  // lê o estado do dia
+  const st = loadState();
+  const cidades = st.cities ?? [];
 
-  // INMET
-  const all = await fetchINMETAlerts();
-  const allowed = ["Perigo", "Grande Perigo"];
-  const byUF = new Map();
-  const cities = [];
-
-  for (const a of all) {
-    if (!allowed.includes(a.nivel)) continue;
-    const uf = a.estado?.toUpperCase?.() || "";
-    if (!uf) continue;
-    if (!byUF.has(uf)) byUF.set(uf, []);
-    byUF.get(uf).push(a);
-    if (a.municipio) cities.push({ name: a.municipio, uf });
+  if (cidades.length === 0) {
+    await tgSend("✅ Nenhum alerta hoje.");
+  } else {
+    await tgSend(`⚠️ Houve alertas hoje\nCidades: ${cidades.sort().join(", ")}`);
   }
 
-  for (const [uf, list] of byUF) {
-    const msg =
-      `⚠️ <b>ALERTA OFICIAL — INMET</b>\n` +
-      `<b>ESTADO:</b> ${uf}\n` +
-      `<b>Municípios sob alerta:</b> ${list.length}\n` +
-      `<b>Nível(is):</b> ${[...new Set(list.map(a=>a.nivel))].join(", ")}`;
-    await sendTelegramHTML(msg);
-    await sleep(SEND_DELAY_MS);
-    sentAny = true;
-  }
-
-  // MONTAR ALVOS
-  const targets = [...CAPITALS];
-  const seen = new Set(targets.map((c)=>`${c.name.toLowerCase()}|${c.uf}`));
-
-  for (const m of cities) {
-    const key = `${m.name.toLowerCase()}|${m.uf}`;
-    if (seen.has(key)) continue;
-    const geo = await geocodeCity(m.name, m.uf, cache);
-    if (geo) targets.push({ name:m.name, uf:m.uf, ...geo });
-  }
-
-  // CHUVA
-  const rain = await fetchRainAlerts(targets);
-  for (const m of rain) {
-    await sendTelegramHTML(m);
-    await sleep(SEND_DELAY_MS);
-    sentAny = true;
-  }
-
-  // SEM ALERTAS
-  if (!sentAny && nowBrtHour() === DAILY_SUMMARY_BRT_HOUR) {
-    await sendTelegramHTML("✅ Sem alertas no momento");
-  }
-
-  console.log(`Execução: INMET=${byUF.size}, CHUVA=${rain.length}, sentAny=${sentAny}`);
+  // marca como fechado e prepara próximo dia
+  markClosed();
+  resetTomorrow();
 }
 
-main();
+// ===== main =====
+async function main(){
+  if (RUN_MODE === "daily") {
+    await dailySummary();
+  } else {
+    await monitorRun();
+  }
+  console.log(`OK ${RUN_MODE} — ${new Date().toISOString()}`);
+}
+
+main().catch(async (e)=>{
+  await tgSend(`❌ Erro: ${e.message}`, false);
+  process.exit(1);
+});
