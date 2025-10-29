@@ -2,11 +2,11 @@ name: Monitoramento 2h
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # A cada 2 horas (UTC)
+    - cron: "0 */2 * * *"     # a cada 2h (UTC)
   workflow_dispatch:
 
 permissions:
-  contents: write   # para commitar o estado em data/
+  contents: write
 
 jobs:
   monitor:
@@ -26,9 +26,9 @@ jobs:
 
       - name: Executar bot (monitor)
         env:
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-  TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
-  RUN_MODE: "monitor" # ou "daily" no diag
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
+          RUN_MODE: "monitor"
         run: node bot.js
 
       - name: Commit do estado (se mudou)
@@ -37,6 +37,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain data/)" ]; then
             git add data/
-            git commit -m "chore(state): update daily alert state [ci skip]"
+            git commit -m "chore(state): update daily state [ci skip]"
             git push
           fi
