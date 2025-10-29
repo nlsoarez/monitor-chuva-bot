@@ -26,9 +26,9 @@ jobs:
 
       - name: Executar bot (monitor)
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
-          RUN_MODE: "monitor"       # <-- modo monitor
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
+  RUN_MODE: "monitor" # ou "daily" no diag
         run: node bot.js
 
       - name: Commit do estado (se mudou)
