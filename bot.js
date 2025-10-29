@@ -2,25 +2,64 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 
-// ====== CONFIG BÁSICA ======
-const CHAT_ID = -1003065918727;                 // seu grupo
+// ====== CONFIG ======
+const CHAT_ID = -1003065918727;                  // grupo/privado alvo
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENWEATHER_KEY = process.env.OPENWEATHER_KEY;
+const TOMORROW_API_KEY = process.env.TOMORROW_API_KEY;
 const RUN_MODE = process.env.RUN_MODE || "monitor"; // "monitor" (2h) | "daily" (22h)
 
-// Chuva
-const THRESHOLD_MM = 10;                 // mm/h
-const API_DELAY = 400;                   // ms entre chamadas
+const THRESHOLD_MM_H = 10;       // limiar de chuva (mm/h)
+const HORIZON_HOURS = 6;         // olha as próximas N horas
+const API_DELAY = 350;           // espaçamento entre chamadas (ms)
 
-// Persistência
+// ====== PERSISTÊNCIA DO DIA ======
 const dataDir = path.join(process.cwd(), "data");
 const todayStr = () => new Date().toISOString().slice(0,10);
 const stateFile = (d = todayStr()) => path.join(dataDir, `${d}.json`);
-const sentAlertsFile = path.join(dataDir, "alertas.json");
 
-// ====== LISTAS ======
-const UFs = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RO","RR","RS","SC","SE","SP","TO"];
+function ensureData() {
+  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+  if (!fs.existsSync(stateFile())) fs.writeFileSync(stateFile(), JSON.stringify({ cities: [], closed: false }, null, 2));
+}
+function loadState() {
+  ensureData();
+  try { return JSON.parse(fs.readFileSync(stateFile(), "utf-8")); }
+  catch { return { cities: [], closed: false }; }
+}
+function saveState(st) {
+  ensureData();
+  fs.writeFileSync(stateFile(), JSON.stringify(st, null, 2));
+}
+function addCityToday(label) {
+  const st = loadState();
+  if (!st.cities.includes(label)) {
+    st.cities.push(label);
+    saveState(st);
+  }
+}
+function rollTomorrow() {
+  const d = new Date(); d.setDate(d.getDate() + 1);
+  const ymd = d.toISOString().slice(0,10);
+  const f = path.join(dataDir, `${ymd}.json`);
+  if (!fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({ cities: [], closed: false }, null, 2));
+}
 
+// ====== TELEGRAM ======
+async function tgSend(text, html = true) {
+  const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      text,
+      parse_mode: html ? "HTML" : undefined,
+      disable_web_page_preview: true,
+    })
+  });
+  return r.json();
+}
+
+// ====== CIDADES (capitais) ======
 const CAPITALS = [
   { uf:"AC", name:"Rio Branco",lat:-9.97499,lon:-67.82430},
   { uf:"AL", name:"Maceió",lat:-9.64985,lon:-35.70895},
@@ -51,260 +90,89 @@ const CAPITALS = [
   { uf:"TO", name:"Palmas",lat:-10.18400,lon:-48.33360},
 ];
 
-// ====== UTILS ======
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function ensureDataFiles(){
-  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive:true });
-  if (!fs.existsSync(stateFile())) fs.writeFileSync(stateFile(), JSON.stringify({ cities: [], closed:false }, null, 2));
-  if (!fs.existsSync(sentAlertsFile)) fs.writeFileSync(sentAlertsFile, JSON.stringify({ sent:{} }, null, 2));
-}
-function loadDayState(){
-  ensureDataFiles();
-  try { return JSON.parse(fs.readFileSync(stateFile(), "utf-8")); }
-  catch { return { cities:[], closed:false }; }
-}
-function saveDayState(st){ ensureDataFiles(); fs.writeFileSync(stateFile(), JSON.stringify(st, null, 2)); }
-function addCityToday(label){
-  const st = loadDayState();
-  if (!st.cities.includes(label)) { st.cities.push(label); saveDayState(st); }
-}
-function rollTomorrow(){
-  const d = new Date(); d.setDate(d.getDate()+1);
-  const ymd = d.toISOString().slice(0,10);
-  const f = path.join(dataDir, `${ymd}.json`);
-  if (!fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({ cities:[], closed:false }, null, 2));
-}
-function loadSent(){
-  ensureDataFiles();
-  try { return JSON.parse(fs.readFileSync(sentAlertsFile, "utf-8")); }
-  catch { return { sent:{} }; }
-}
-function saveSent(obj){ ensureDataFiles(); fs.writeFileSync(sentAlertsFile, JSON.stringify(obj, null, 2)); }
-
-function norm(s){ return (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase(); }
-
-async function tgSend(text, html = true){
-  const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`,{
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: html ? "HTML" : undefined, disable_web_page_preview:true })
-  });
-  return r.json();
+// ====== TOMORROW.IO (Timelines v4) ======
+function isoNowPlus(hours = 0) {
+  const d = new Date();
+  d.setHours(d.getHours() + hours);
+  return d.toISOString();
 }
 
-// ====== OPENWEATHER (chuva horária) ======
-function owUrl(lat, lon){
-  return `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric&lang=pt_br&exclude=minutely,daily`;
+function tlUrl(lat, lon) {
+  const start = encodeURIComponent(isoNowPlus(0));
+  const end   = encodeURIComponent(isoNowPlus(HORIZON_HOURS));
+  const fields = encodeURIComponent("precipitationIntensity");
+  const timesteps = "1h";
+  // SI já retorna mm/h; não precisa setar units
+  return `https://api.tomorrow.io/v4/timelines?location=${lat},${lon}&fields=${fields}&timesteps=${timesteps}&startTime=${start}&endTime=${end}&apikey=${TOMORROW_API_KEY}`;
 }
 
-async function checkRainCapitals(){
-  const msgs = [];
-  for (const c of CAPITALS){
-    try{
-      const r = await fetch(owUrl(c.lat,c.lon));
-      if (!r.ok){ await sleep(API_DELAY); continue; }
-      const d = await r.json();
-      const mm = d?.hourly?.[0]?.rain?.["1h"] ?? 0;
-      if (mm >= THRESHOLD_MM){
-        msgs.push(`🌧️ <b>${c.name.toUpperCase()}</b>\n~${Number(mm).toFixed(1)} mm/h`);
+function maxIntensityFromTimeline(json) {
+  // Estrutura esperada: data.timelines[0].intervals[{ startTime, values: { precipitationIntensity } }]
+  const intervals = json?.data?.timelines?.[0]?.intervals || [];
+  let max = 0;
+  let when = null;
+  for (const it of intervals) {
+    const v = Number(it?.values?.precipitationIntensity ?? 0);
+    if (v > max) { max = v; when = it?.startTime; }
+  }
+  return { max, when };
+}
+
+async function checkRainTomorrowIO() {
+  const hits = []; // mensagens
+  for (const c of CAPITALS) {
+    try {
+      const r = await fetch(tlUrl(c.lat, c.lon));
+      if (!r.ok) { await sleep(API_DELAY); continue; }
+      const data = await r.json();
+      const { max, when } = maxIntensityFromTimeline(data);
+      if (max >= THRESHOLD_MM_H) {
+        const hr = when ? new Date(when).toLocaleTimeString("pt-BR",{ hour:"2-digit", minute:"2-digit" }) : "próx. horas";
+        hits.push(`🌧️ <b>${c.name.toUpperCase()}</b>\n~${max.toFixed(1)} mm/h por volta de ${hr}`);
         addCityToday(c.name);
       }
-    }catch{}
+    } catch {}
     await sleep(API_DELAY);
   }
-  return msgs;
+  return hits;
 }
 
-// ====== INMET via RSS (27 UFs) ======
-// O INMET tem trocado rotas; vamos tentar múltiplos padrões por UF e usar o primeiro que responder 200.
-function inmetUfCandidates(uf){
-  return [
-    `https://alertas2.inmet.gov.br/rss/${uf}`,              // ex.: /rss/RJ
-    `https://alertas2.inmet.gov.br/rss/${uf}.xml`,          // ex.: /rss/RJ.xml
-    `https://alertas2.inmet.gov.br/estado/${uf}/rss`,       // ex.: /estado/RJ/rss
-    `https://alertas2.inmet.gov.br/rss?uf=${uf}`,           // ex.: /rss?uf=RJ
-  ];
-}
-
-async function fetchText(url){
-  try{
-    const r = await fetch(url, { timeout: 15000 });
-    if (!r.ok) return null;
-    const txt = await r.text();
-    if (!txt || txt.length < 50) return null;
-    return txt;
-  }catch{ return null; }
-}
-
-// RSS parser simples (sem dependência): extrai <item>...</item>, título, desc, pubDate, guid/link
-function parseRssItems(xml){
-  const items = [];
-  const itemRegex = /<item[\s\S]*?<\/item>/gi;
-  const tag = (block, name) => {
-    const m = new RegExp(`<${name}[^>]*>([\\s\\S]*?)<\\/${name}>`,"i").exec(block);
-    return m ? m[1].replace(/<!\[CDATA\[(.*?)\]\]>/gs, "$1").trim() : "";
-  };
-  let m;
-  while ((m = itemRegex.exec(xml)) !== null){
-    const block = m[0];
-    const title = tag(block, "title");
-    const desc = tag(block, "description");
-    const pubDate = tag(block, "pubDate");
-    const guid = tag(block, "guid") || tag(block, "link") || (title + "|" + pubDate);
-    items.push({ guid, title, desc, pubDate });
+// ====== EXECUÇÕES ======
+async function monitorRun() {
+  const msgs = await checkRainTomorrowIO();
+  for (const m of msgs) {
+    await tgSend(m);
+    await sleep(900);
   }
-  return items;
+  console.log(`TomorrowIO hits: ${msgs.length}`);
 }
 
-function detectLevel(t, d){
-  const s = norm(`${t} ${d}`);
-  if (s.includes("vermelho")) return "Vermelho";
-  if (s.includes("laranja"))  return "Laranja";
-  if (s.includes("amarelo"))  return "Amarelo";
-  return "Desconhecido";
-}
-
-function detectValidity(t, d){
-  // tenta capturar algo como "até 18:00" / "vigência" etc. (heurística simples)
-  const s = `${t} ${d}`;
-  const m = s.match(/(até|ate)\s+(\d{1,2}:\d{2})/i);
-  return m ? m[0] : "";
-}
-
-function matchCitiesFromText(t, d){
-  const s = norm(`${t} ${d}`);
-  const found = new Set();
-  for (const c of CAPITALS){
-    if (s.includes(norm(c.name))) found.add(c.name);
-  }
-  return [...found];
-}
-
-function ufFromContext(uf, t, d){
-  // já sabemos a UF do feed, mas se o texto mencionar outra UF também, mantemos a do feed.
-  return uf;
-}
-
-function buildInmetSummary(item, uf){
-  const level = detectLevel(item.title, item.desc);
-  const validity = detectValidity(item.title, item.desc);
-  const areas = matchCitiesFromText(item.title, item.desc); // capitais encontradas
-  const abr = areas.length ? ` — ${areas.join(", ")}` : "";
-  const valTxt = validity ? `\nVigência: ${validity}` : "";
-  return {
-    text: `⚠️ <b>ALERTA OFICIAL — INMET</b>\nUF: <b>${uf}</b>${abr}\nNível: <b>${level}</b>${valTxt}\n${item.title}`,
-    level,
-    areas,
-  };
-}
-
-async function fetchInmetAlertsByUF(){
-  const results = []; // { uf, items:[{guid,title,desc,pubDate}] }
-  for (const uf of UFs){
-    let xml = null;
-    for (const url of inmetUfCandidates(uf)){
-      xml = await fetchText(url);
-      if (xml) break;
-    }
-    if (!xml){ await sleep(150); continue; }
-    const items = parseRssItems(xml);
-    results.push({ uf, items });
-    await sleep(150);
-  }
-  return results;
-}
-
-async function processInmetAndSend(){
-  const sentDb = loadSent(); // { sent: { guid: timestamp } }
-  const msgsNew = [];
-  const msgsContinue = [];
-
-  const perUF = await fetchInmetAlertsByUF();
-
-  for (const group of perUF){
-    const uf = group.uf;
-    for (const it of group.items){
-      const id = `${uf}|${it.guid}`;
-      const already = !!sentDb.sent[id];
-
-      // resumo curto (sua opção B)
-      const summary = buildInmetSummary(it, uf);
-
-      // registrar cidades/uf para o resumo das 22h:
-      if (summary.areas.length){
-        summary.areas.forEach((city) => addCityToday(city));
-      } else {
-        addCityToday(uf); // regional/UF
-      }
-
-      if (!already){
-        msgsNew.push(summary.text);
-        sentDb.sent[id] = Date.now();
-      } else {
-        // opção 3: não repete, envia aviso curto de continuidade
-        const label = summary.areas.length ? summary.areas.join(", ") : uf;
-        msgsContinue.push(`⚠️ Alerta continua ativo em ${label}`);
-      }
-    }
-  }
-
-  // Enviar INMET primeiro (novos, depois continuações)
-  for (const m of msgsNew){ await tgSend(m); await sleep(1200); }
-  for (const m of msgsContinue){ await tgSend(m); await sleep(900); }
-
-  // salvar DB de enviados
-  saveSent(sentDb);
-
-  return { newCount: msgsNew.length, contCount: msgsContinue.length };
-}
-
-// ====== RESUMO 22h ======
-async function dailySummary(){
-  const st = loadDayState();
-  const list = (st.cities || []).slice().sort();
-  if (list.length === 0){
+async function dailySummary() {
+  const st = loadState();
+  const cities = (st.cities || []).slice().sort();
+  if (cities.length === 0) {
     await tgSend("✅ Nenhum alerta hoje.");
   } else {
-    await tgSend(`⚠️ Houve alertas hoje\nCidades: ${list.join(", ")}`);
+    await tgSend(`⚠️ Houve alertas hoje\nCidades: ${cities.join(", ")}`);
   }
-  // marca e prepara próximo dia
-  st.closed = true; saveDayState(st);
-  // cria arquivo do próximo dia (facilita commit no workflow)
+  st.closed = true; saveState(st);
   rollTomorrow();
 }
 
-// ====== MONITOR 2h (INMET → CHUVA) ======
-async function monitorRun(){
-  // 1) INMET (RSS por UF, opção 3 de repetidos)
-  const inmet = await processInmetAndSend();
-
-  // 2) CHUVA (capitais)
-  const rain = await checkRainCapitals();
-  for (const m of rain){ await tgSend(m); await sleep(900); }
-
-  // (logs de console apenas para debug no Actions)
-  console.log(`INMET: new=${inmet.newCount}, continue=${inmet.contCount} | RAIN: ${rain.length}`);
-}
-
 // ====== MAIN ======
-async function main(){
-  if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN ausente.");
-  if (!OPENWEATHER_KEY && RUN_MODE !== "daily") {
-    // daily não usa OpenWeather
-    throw new Error("OPENWEATHER_KEY ausente.");
-  }
+async function main() {
+  if (!TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
+  if (!TOMORROW_API_KEY && RUN_MODE !== "daily") throw new Error("Falta TOMORROW_API_KEY");
 
-  if (RUN_MODE === "daily"){
+  if (RUN_MODE === "daily") {
     await dailySummary();
   } else {
     await monitorRun();
   }
-
   console.log(`OK ${RUN_MODE} — ${new Date().toISOString()}`);
 }
 
-main().catch(async (e)=>{
+main().catch(async (e) => {
   try { await tgSend(`❌ Erro: ${e.message}`, false); } catch {}
   process.exit(1);
 });
