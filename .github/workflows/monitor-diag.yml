@@ -27,7 +27,7 @@ jobs:
       - name: Executar bot (resumo 22h)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
           RUN_MODE: "daily"         # <-- modo resumo diário
         run: node bot.js
 
