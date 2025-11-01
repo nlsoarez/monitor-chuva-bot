@@ -3,31 +3,34 @@ import fs from "fs";
 import path from "path";
 
 // ===================== CONFIG GERAL =====================
-const CHAT_ID = -1003065918727; // seu grupo/privado
+const CHAT_ID = -1003065918727;
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TOMORROW_API_KEY = process.env.TOMORROW_API_KEY;
-const RUN_MODE = process.env.RUN_MODE || "monitor"; // "monitor" (2h) | "daily" (22h)
+const RUN_MODE = process.env.RUN_MODE || "monitor";
 
-// Regras definidas por você
-const HORIZON_HOURS = 6;     // próximas 6h
-const THRESHOLD_MM_H = 10;   // chuva forte
-const API_DELAY = 350;       // espaçamento entre chamadas (ms)
+const HORIZON_HOURS = 6;
+const THRESHOLD_MM_H = 10;
+const API_DELAY = 350;
 
-// util
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ===================== PERSISTÊNCIA =====================
 const dataDir = path.join(process.cwd(), "data");
+const cacheDir = path.join(process.cwd(), ".cache");
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const stateFile = (d = todayStr()) => path.join(dataDir, `${d}.json`);
+const alertsCacheFile = () => path.join(cacheDir, "alerts.json");
 
 function ensureData() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
   if (!fs.existsSync(stateFile()))
     fs.writeFileSync(
       stateFile(),
       JSON.stringify({ cities: [], closed: false }, null, 2)
     );
+  if (!fs.existsSync(alertsCacheFile()))
+    fs.writeFileSync(alertsCacheFile(), JSON.stringify({ sent: {} }, null, 2));
 }
 
 function loadState() {
@@ -42,6 +45,43 @@ function loadState() {
 function saveState(st) {
   ensureData();
   fs.writeFileSync(stateFile(), JSON.stringify(st, null, 2));
+}
+
+function loadAlertCache() {
+  ensureData();
+  try {
+    return JSON.parse(fs.readFileSync(alertsCacheFile(), "utf-8"));
+  } catch {
+    return { sent: {} };
+  }
+}
+
+function saveAlertCache(cache) {
+  ensureData();
+  fs.writeFileSync(alertsCacheFile(), JSON.stringify(cache, null, 2));
+}
+
+function wasAlertSent(key) {
+  const cache = loadAlertCache();
+  const today = todayStr();
+  return cache.sent[key] === today;
+}
+
+function markAlertSent(key) {
+  const cache = loadAlertCache();
+  const today = todayStr();
+  cache.sent[key] = today;
+  
+  // Limpa alertas antigos (mais de 7 dias)
+  const weekAgo = new Date();
+  weekAgo.setDate(weekAgo.getDate() - 7);
+  const cutoff = weekAgo.toISOString().slice(0, 10);
+  
+  for (const k in cache.sent) {
+    if (cache.sent[k] < cutoff) delete cache.sent[k];
+  }
+  
+  saveAlertCache(cache);
 }
 
 function addCityToday(label) {
@@ -63,17 +103,26 @@ function rollTomorrow() {
 
 // ===================== TELEGRAM =====================
 async function tgSend(text, html = true) {
-  const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: CHAT_ID,
-      text,
-      parse_mode: html ? "HTML" : undefined,
-      disable_web_page_preview: true,
-    }),
-  });
-  return r.json();
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text,
+        parse_mode: html ? "HTML" : undefined,
+        disable_web_page_preview: true,
+      }),
+    });
+    const result = await r.json();
+    if (!result.ok) {
+      console.error("Telegram API error:", result);
+    }
+    return result;
+  } catch (e) {
+    console.error("Erro ao enviar mensagem:", e.message);
+    return null;
+  }
 }
 
 async function tgPin(message_id) {
@@ -81,7 +130,9 @@ async function tgPin(message_id) {
     await fetch(
       `https://api.telegram.org/bot${TOKEN}/pinChatMessage?chat_id=${CHAT_ID}&message_id=${message_id}&disable_notification=false`
     );
-  } catch {}
+  } catch (e) {
+    console.error("Erro ao fixar mensagem:", e.message);
+  }
 }
 
 // ===================== CIDADES (capitais) =====================
@@ -115,146 +166,234 @@ const CAPITALS = [
   { uf: "TO", name: "Palmas", lat: -10.184, lon: -48.3336 },
 ];
 
-// ===================== TOMORROW.IO — Forecast & Alerts =====================
-// Forecast (horário) — endpoint oficial
+// ===================== TOMORROW.IO =====================
 function forecastUrl(lat, lon) {
-  return `https://api.tomorrow.io/v4/weather/forecast?location=${lat},${lon}&apikey=${TOMORROW_API_KEY}`;
+  return `https://api.tomorrow.io/v4/weather/forecast?location=${lat},${lon}&timesteps=1h&apikey=${TOMORROW_API_KEY}`;
 }
-// Alerts — endpoint oficial
+
 function alertsUrl(lat, lon) {
   return `https://api.tomorrow.io/v4/weather/alerts?location=${lat},${lon}&apikey=${TOMORROW_API_KEY}`;
 }
 
-// Extrai horas com precipitação >= limiar nas próximas HORIZON_HOURS
 function extractHeavyRainHours(forecastJson) {
-  // Estrutura esperada: data.timelines.hourly = [{ time, values: { precipitationIntensity } }, ...]
-  const hourly = forecastJson?.timelines?.hourly || [];
+  const timelines = forecastJson?.timelines || [];
+  let hourly = [];
+  
+  // Procura pela timeline horária
+  for (const timeline of timelines) {
+    if (timeline.timestep === "1h" || timeline.timestep === "1hour") {
+      hourly = timeline.intervals || [];
+      break;
+    }
+  }
+  
+  if (hourly.length === 0) {
+    console.log("⚠️ Nenhum dado horário encontrado na resposta");
+    return [];
+  }
+
   const now = Date.now();
   const limit = now + HORIZON_HOURS * 3600 * 1000;
-
   const hits = [];
-  for (const it of hourly) {
-    const t = new Date(it?.time).getTime();
+
+  for (const interval of hourly) {
+    const t = new Date(interval?.startTime).getTime();
     if (!t || t > limit) continue;
-    const v = Number(it?.values?.precipitationIntensity ?? 0);
-    if (v >= THRESHOLD_MM_H) {
+    
+    const precip = Number(interval?.values?.precipitationIntensity ?? 0);
+    
+    if (precip >= THRESHOLD_MM_H) {
       const hh = new Date(t).toLocaleTimeString("pt-BR", {
         hour: "2-digit",
         minute: "2-digit",
       });
-      hits.push({ time: hh, value: v });
+      hits.push({ time: hh, value: precip });
     }
   }
+  
   return hits;
 }
 
-// Normaliza severidade (para decidir se fixa)
 function normalizeSeverity(s) {
   const x = (s || "").toString().toLowerCase();
-  if (x.includes("red") || x.includes("vermelh")) return "red";
-  if (x.includes("orange") || x.includes("laranj")) return "orange";
-  if (x.includes("yellow") || x.includes("amarel")) return "yellow";
+  if (x.includes("red") || x.includes("vermelh") || x.includes("extreme")) return "red";
+  if (x.includes("orange") || x.includes("laranj") || x.includes("severe")) return "orange";
+  if (x.includes("yellow") || x.includes("amarel") || x.includes("moderate")) return "yellow";
   return x || "unknown";
 }
 
-// Resume alerta do Tomorrow.io
 function summarizeAlert(a, cityLabel) {
-  // Estruturas prováveis:
-  // a.severity, a.event, a.description, a.timeOnset / a.timeEnd / a.effectiveTime / a.expiresTime
   const sev = normalizeSeverity(a?.severity);
-  const event = a?.event || "Alerta meteorológico";
-  const end =
-    a?.timeEnd ||
-    a?.expiresTime ||
-    a?.expires ||
-    a?.ends ||
-    a?.effectiveTimeEnd ||
-    null;
-
+  const event = a?.event || a?.eventType || "Alerta meteorológico";
+  const desc = a?.description || "";
+  
+  const end = a?.timeEnd || a?.expiresTime || a?.expires || a?.ends || null;
   const endTxt = end
     ? new Date(end).toLocaleTimeString("pt-BR", {
         hour: "2-digit",
         minute: "2-digit",
+        day: "2-digit",
+        month: "2-digit",
       })
     : "em aberto";
 
-  const text = `🚨 ALERTA (${sev.toUpperCase()}) — ${cityLabel}\nEvento: ${event}\nVálido até: ${endTxt}`;
+  let text = `🚨 <b>ALERTA ${sev.toUpperCase()}</b> — ${cityLabel}\n`;
+  text += `📍 Evento: ${event}\n`;
+  if (desc && desc.length < 200) text += `ℹ️ ${desc}\n`;
+  text += `⏰ Válido até: ${endTxt}`;
+  
   return { sev, text };
 }
 
-// ===================== ROTINAS DE MONITORAMENTO =====================
-// 1) ALERTAS (Tomorrow.io) — prioridade 1
+// ===================== PROCESSAMENTO =====================
 async function processAlertsForCity(city) {
   try {
+    console.log(`🔍 Verificando alertas para ${city.name}...`);
     const r = await fetch(alertsUrl(city.lat, city.lon));
-    if (!r.ok) return;
+    
+    if (!r.ok) {
+      console.log(`❌ API retornou status ${r.status} para ${city.name}`);
+      return;
+    }
+    
     const data = await r.json();
-    const alerts = data?.alerts || data?.data?.alerts || []; // atende variações
+    const alerts = data?.alerts || data?.data?.alerts || data?.data || [];
+    
+    if (!Array.isArray(alerts) || alerts.length === 0) {
+      console.log(`✅ Nenhum alerta para ${city.name}`);
+      return;
+    }
+    
+    console.log(`⚠️ ${alerts.length} alerta(s) encontrado(s) para ${city.name}`);
+    
     for (const a of alerts) {
+      const alertKey = `alert_${city.name}_${a?.event || 'unknown'}_${a?.severity || 'unknown'}`;
+      
+      if (wasAlertSent(alertKey)) {
+        console.log(`⏭️ Alerta já enviado hoje: ${alertKey}`);
+        continue;
+      }
+      
       const { sev, text } = summarizeAlert(a, city.name.toUpperCase());
       const sent = await tgSend(text);
-      if (sev === "red" && sent?.result?.message_id) {
-        // fixa se vermelho
-        await tgPin(sent.result.message_id);
+      
+      if (sent?.ok) {
+        markAlertSent(alertKey);
+        addCityToday(city.name);
+        
+        if (sev === "red" && sent?.result?.message_id) {
+          await tgPin(sent.result.message_id);
+        }
+        
+        console.log(`✉️ Alerta enviado: ${city.name} (${sev})`);
       }
-      addCityToday(city.name); // conta pro resumo
+      
       await sleep(600);
     }
-  } catch {}
+  } catch (e) {
+    console.error(`❌ Erro ao processar alertas de ${city.name}:`, e.message);
+  }
 }
 
-// 2) CHUVA (Tomorrow.io) — prioridade 2
 async function processRainForCity(city) {
   try {
+    console.log(`🌧️ Verificando chuva para ${city.name}...`);
     const r = await fetch(forecastUrl(city.lat, city.lon));
-    if (!r.ok) return;
+    
+    if (!r.ok) {
+      console.log(`❌ API retornou status ${r.status} para ${city.name}`);
+      return;
+    }
+    
     const data = await r.json();
-    const hours = extractHeavyRainHours(data); // [{time,value}]
-
-    // sua escolha: 1 mensagem POR HORA detectada
+    const hours = extractHeavyRainHours(data);
+    
+    if (hours.length === 0) {
+      console.log(`✅ Sem chuva forte prevista para ${city.name}`);
+      return;
+    }
+    
+    console.log(`🌧️ ${hours.length} período(s) de chuva forte para ${city.name}`);
+    
     for (const h of hours) {
-      const msg = `🌧️ Chuva forte prevista em <b>${city.name.toUpperCase()}</b> às ${h.time} — ${h.value.toFixed(
-        1
-      )} mm/h`;
-      await tgSend(msg);
-      addCityToday(city.name);
+      const rainKey = `rain_${city.name}_${h.time}_${todayStr()}`;
+      
+      if (wasAlertSent(rainKey)) {
+        console.log(`⏭️ Chuva já reportada: ${rainKey}`);
+        continue;
+      }
+      
+      const msg = `🌧️ <b>Chuva forte prevista</b> em <b>${city.name.toUpperCase()}</b>\n⏰ Horário: ${h.time}\n💧 Intensidade: ${h.value.toFixed(1)} mm/h`;
+      const sent = await tgSend(msg);
+      
+      if (sent?.ok) {
+        markAlertSent(rainKey);
+        addCityToday(city.name);
+        console.log(`✉️ Alerta de chuva enviado: ${city.name} às ${h.time}`);
+      }
+      
       await sleep(600);
     }
-  } catch {}
+  } catch (e) {
+    console.error(`❌ Erro ao processar chuva de ${city.name}:`, e.message);
+  }
 }
 
 // ===================== EXECUÇÕES =====================
 async function monitorRun() {
-  // Para cada capital:
+  console.log(`\n🚀 Iniciando monitoramento às ${new Date().toLocaleString('pt-BR')}`);
+  let alertsCount = 0;
+  let rainCount = 0;
+  
   for (const c of CAPITALS) {
-    // 1) ALERTAS oficiais primeiro
+    console.log(`\n--- Processando: ${c.name} (${c.uf}) ---`);
+    
+    const beforeAlerts = loadState().cities.length;
     await processAlertsForCity(c);
-    // 2) Depois CHUVA prevista
+    const afterAlerts = loadState().cities.length;
+    if (afterAlerts > beforeAlerts) alertsCount++;
+    
+    const beforeRain = loadState().cities.length;
     await processRainForCity(c);
+    const afterRain = loadState().cities.length;
+    if (afterRain > beforeRain) rainCount++;
+    
     await sleep(API_DELAY);
   }
-  console.log(`Monitor run OK — ${new Date().toISOString()}`);
+  
+  console.log(`\n✅ Monitor concluído às ${new Date().toLocaleString('pt-BR')}`);
+  console.log(`📊 Resumo: ${alertsCount} alertas, ${rainCount} previsões de chuva`);
 }
 
 async function dailySummary() {
+  console.log(`\n📋 Gerando resumo diário às ${new Date().toLocaleString('pt-BR')}`);
+  
   const st = loadState();
   const cities = (st.cities || []).slice().sort();
+  
   if (cities.length === 0) {
-    await tgSend("✅ Nenhum alerta hoje.");
+    await tgSend("✅ <b>Resumo Diário</b>\n\nNenhum alerta registrado hoje. Tudo tranquilo! 🌤️");
   } else {
-    await tgSend(`⚠️ Houve alertas hoje\nCidades: ${cities.join(", ")}`);
+    const msg = `⚠️ <b>Resumo Diário</b>\n\n${cities.length} cidade(s) com alertas hoje:\n\n${cities.join(", ")}`;
+    await tgSend(msg);
   }
+  
   st.closed = true;
   saveState(st);
   rollTomorrow();
-  console.log(`Daily summary OK — ${new Date().toISOString()}`);
+  
+  console.log(`✅ Resumo enviado. ${cities.length} cidades com alertas.`);
 }
 
 // ===================== MAIN =====================
 async function main() {
-  if (!TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
-  if (!TOMORROW_API_KEY && RUN_MODE !== "daily")
-    throw new Error("Falta TOMORROW_API_KEY");
+  if (!TOKEN) {
+    throw new Error("❌ Falta TELEGRAM_BOT_TOKEN");
+  }
+  
+  if (!TOMORROW_API_KEY && RUN_MODE !== "daily") {
+    throw new Error("❌ Falta TOMORROW_API_KEY");
+  }
 
   if (RUN_MODE === "daily") {
     await dailySummary();
@@ -262,9 +401,16 @@ async function main() {
     await monitorRun();
   }
 }
+
 main().catch(async (e) => {
+  console.error("❌ ERRO FATAL:", e.message);
+  console.error(e.stack);
+  
   try {
-    await tgSend(`❌ Erro: ${e.message}`, false);
-  } catch {}
+    await tgSend(`❌ <b>Erro no Monitor</b>\n\n${e.message}`, true);
+  } catch (telegramError) {
+    console.error("❌ Não foi possível enviar erro ao Telegram:", telegramError.message);
+  }
+  
   process.exit(1);
 });
