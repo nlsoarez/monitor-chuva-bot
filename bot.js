@@ -357,12 +357,13 @@ function parseINMETRSS(xml) {
     
     if (affectedCapitals.size === 0) continue;
     
-    // Filtrar apenas eventos relacionados a chuva
+    // Filtrar apenas eventos relacionados a chuva e tempestades
     const evento = eventoMatch ? eventoMatch[1] : "Alerta";
     const isRainRelated = 
       evento.includes("Chuva") || 
       evento.includes("Tempestade") || 
-      evento.includes("Acumulado");
+      evento.includes("Acumulado") ||
+      evento.includes("Vendaval");
     
     if (!isRainRelated) {
       console.log(`⏭️ Ignorando alerta não relacionado a chuva: ${evento}`);
