@@ -357,12 +357,36 @@ function parseINMETRSS(xml) {
     
     if (affectedCapitals.size === 0) continue;
     
+    // Filtrar apenas eventos relacionados a chuva
+    const evento = eventoMatch ? eventoMatch[1] : "Alerta";
+    const isRainRelated = 
+      evento.includes("Chuva") || 
+      evento.includes("Tempestade") || 
+      evento.includes("Acumulado");
+    
+    if (!isRainRelated) {
+      console.log(`⏭️ Ignorando alerta não relacionado a chuva: ${evento}`);
+      continue;
+    }
+    
+    // Verificar se o alerta ainda é válido (não expirou)
+    const fim = fimMatch ? fimMatch[1] : "";
+    if (fim) {
+      const fimDate = new Date(fim.replace(" ", "T"));
+      const now = new Date();
+      
+      if (fimDate < now) {
+        console.log(`⏭️ Alerta expirado (fim: ${fim}): ${evento}`);
+        continue;
+      }
+    }
+    
     alerts.push({
       id: guidMatch ? guidMatch[1] : linkMatch[1],
-      evento: eventoMatch ? eventoMatch[1] : "Alerta",
+      evento,
       severidade: severidadeMatch ? severidadeMatch[1] : "Desconhecida",
       inicio: inicioMatch ? inicioMatch[1] : "",
-      fim: fimMatch ? fimMatch[1] : "",
+      fim,
       descricao: descricaoMatch ? descricaoMatch[1] : "",
       link: linkMatch ? linkMatch[1] : "",
       capitais: Array.from(affectedCapitals),
