@@ -25,10 +25,7 @@ function ensureData() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
   if (!fs.existsSync(stateFile()))
-    fs.writeFileSync(
-      stateFile(),
-      JSON.stringify({ cities: [], closed: false }, null, 2)
-    );
+    fs.writeFileSync(stateFile(), JSON.stringify({ cities: [], closed: false }, null, 2));
   if (!fs.existsSync(alertsCacheFile()))
     fs.writeFileSync(alertsCacheFile(), JSON.stringify({ sent: {} }, null, 2));
 }
@@ -72,7 +69,6 @@ function markAlertSent(key) {
   const today = todayStr();
   cache.sent[key] = today;
   
-  // Limpa alertas antigos (mais de 7 dias)
   const weekAgo = new Date();
   weekAgo.setDate(weekAgo.getDate() - 7);
   const cutoff = weekAgo.toISOString().slice(0, 10);
@@ -166,20 +162,227 @@ const CAPITALS = [
   { uf: "TO", name: "Palmas", lat: -10.184, lon: -48.3336 },
 ];
 
+// Mapa: Regiões INMET → Capitais
+const INMET_TO_CAPITAL = {
+  "Vale do Acre": ["Rio Branco"],
+  "Vale do Juruá": ["Rio Branco"],
+  "Leste Alagoano": ["Maceió"],
+  "Sertão Alagoano": ["Maceió"],
+  "Sul de Roraima": ["Boa Vista"],
+  "Norte de Roraima": ["Boa Vista"],
+  "Norte Amazonense": ["Manaus"],
+  "Centro Amazonense": ["Manaus"],
+  "Sudoeste Amazonense": ["Manaus"],
+  "Sul Amazonense": ["Manaus"],
+  "Sudoeste Paraense": ["Belém"],
+  "Sudeste Paraense": ["Belém"],
+  "Baixo Amazonas": ["Belém"],
+  "Norte Maranhense": ["São Luís"],
+  "Leste Maranhense": ["São Luís"],
+  "Centro Maranhense": ["São Luís"],
+  "Oeste Maranhense": ["São Luís"],
+  "Sul Maranhense": ["São Luís"],
+  "Norte Piauiense": ["Teresina"],
+  "Centro-Norte Piauiense": ["Teresina"],
+  "Sudeste Piauiense": ["Teresina"],
+  "Sudoeste Piauiense": ["Teresina"],
+  "Norte Cearense": ["Fortaleza"],
+  "Metropolitana de Fortaleza": ["Fortaleza"],
+  "Noroeste Cearense": ["Fortaleza"],
+  "Centro-Sul Cearense": ["Fortaleza"],
+  "Sul Cearense": ["Fortaleza"],
+  "Jaguaribe": ["Fortaleza"],
+  "Sertões Cearenses": ["Fortaleza"],
+  "Oeste Potiguar": ["Natal"],
+  "Central Potiguar": ["Natal"],
+  "Leste Potiguar": ["Natal"],
+  "Agreste Potiguar": ["Natal"],
+  "Sertão Paraibano": ["João Pessoa"],
+  "Borborema": ["João Pessoa"],
+  "Agreste Paraibano": ["João Pessoa"],
+  "Zona da Mata Paraibana": ["João Pessoa"],
+  "Sertão Pernambucano": ["Recife"],
+  "São Francisco Pernambucano": ["Recife"],
+  "Agreste Pernambucano": ["Recife"],
+  "Metropolitana de Recife": ["Recife"],
+  "Metropolitana de Salvador": ["Salvador"],
+  "Sul Baiano": ["Salvador"],
+  "Centro Sul Baiano": ["Salvador"],
+  "Centro Norte Baiano": ["Salvador"],
+  "Vale São-Franciscano da Bahia": ["Salvador"],
+  "Extremo Oeste Baiano": ["Salvador"],
+  "Nordeste Baiano": ["Salvador"],
+  "Leste Sergipano": ["Aracaju"],
+  "Metropolitana de Aracaju": ["Aracaju"],
+  "Noroeste de Minas": ["Belo Horizonte"],
+  "Norte de Minas": ["Belo Horizonte"],
+  "Jequitinhonha": ["Belo Horizonte"],
+  "Vale do Mucuri": ["Belo Horizonte"],
+  "Triângulo Mineiro/Alto Paranaíba": ["Belo Horizonte"],
+  "Central Mineira": ["Belo Horizonte"],
+  "Metropolitana de Belo Horizonte": ["Belo Horizonte"],
+  "Vale do Rio Doce": ["Belo Horizonte"],
+  "Oeste de Minas": ["Belo Horizonte"],
+  "Sul/Sudoeste de Minas": ["Belo Horizonte"],
+  "Campo das Vertentes": ["Belo Horizonte"],
+  "Zona da Mata": ["Belo Horizonte"],
+  "Noroeste Espírito-santense": ["Vitória"],
+  "Litoral Norte Espírito-santense": ["Vitória"],
+  "Central Espírito-santense": ["Vitória"],
+  "Sul Espírito-santense": ["Vitória"],
+  "Norte Fluminense": ["Rio de Janeiro"],
+  "Noroeste Fluminense": ["Rio de Janeiro"],
+  "Centro Fluminense": ["Rio de Janeiro"],
+  "Baixadas": ["Rio de Janeiro"],
+  "Sul Fluminense": ["Rio de Janeiro"],
+  "Metropolitana do Rio de Janeiro": ["Rio de Janeiro"],
+  "São José do Rio Preto": ["São Paulo"],
+  "Ribeirão Preto": ["São Paulo"],
+  "Araçatuba": ["São Paulo"],
+  "Bauru": ["São Paulo"],
+  "Araraquara": ["São Paulo"],
+  "Piracicaba": ["São Paulo"],
+  "Campinas": ["São Paulo"],
+  "Presidente Prudente": ["São Paulo"],
+  "Marília": ["São Paulo"],
+  "Assis": ["São Paulo"],
+  "Itapetininga": ["São Paulo"],
+  "Macro Metropolitana Paulista": ["São Paulo"],
+  "Vale do Paraíba Paulista": ["São Paulo"],
+  "Litoral Sul Paulista": ["São Paulo"],
+  "Metropolitana de São Paulo": ["São Paulo"],
+  "Noroeste Paranaense": ["Curitiba"],
+  "Centro Ocidental Paranaense": ["Curitiba"],
+  "Norte Central Paranaense": ["Curitiba"],
+  "Norte Pioneiro Paranaense": ["Curitiba"],
+  "Centro Oriental Paranaense": ["Curitiba"],
+  "Oeste Paranaense": ["Curitiba"],
+  "Sudoeste Paranaense": ["Curitiba"],
+  "Centro-Sul Paranaense": ["Curitiba"],
+  "Sudeste Paranaense": ["Curitiba"],
+  "Metropolitana de Curitiba": ["Curitiba"],
+  "Oeste Catarinense": ["Florianópolis"],
+  "Norte Catarinense": ["Florianópolis"],
+  "Serrana": ["Florianópolis"],
+  "Vale do Itajaí": ["Florianópolis"],
+  "Grande Florianópolis": ["Florianópolis"],
+  "Sul Catarinense": ["Florianópolis"],
+  "Noroeste Rio-grandense": ["Porto Alegre"],
+  "Nordeste Rio-grandense": ["Porto Alegre"],
+  "Centro Ocidental Rio-grandense": ["Porto Alegre"],
+  "Centro Oriental Rio-grandense": ["Porto Alegre"],
+  "Metropolitana de Porto Alegre": ["Porto Alegre"],
+  "Sudoeste Rio-grandense": ["Porto Alegre"],
+  "Sudeste Rio-grandense": ["Porto Alegre"],
+  "Centro-Sul Mato-grossense": ["Cuiabá"],
+  "Norte Mato-grossense": ["Cuiabá"],
+  "Nordeste Mato-grossense": ["Cuiabá"],
+  "Sudeste Mato-grossense": ["Cuiabá"],
+  "Sudoeste Mato-grossense": ["Cuiabá"],
+  "Pantanais Sul Mato-grossense": ["Campo Grande"],
+  "Centro Norte de Mato Grosso do Sul": ["Campo Grande"],
+  "Leste de Mato Grosso do Sul": ["Campo Grande"],
+  "Sudoeste de Mato Grosso do Sul": ["Campo Grande"],
+  "Norte Goiano": ["Goiânia"],
+  "Leste Goiano": ["Goiânia"],
+  "Centro Goiano": ["Goiânia"],
+  "Sul Goiano": ["Goiânia"],
+  "Noroeste Goiano": ["Goiânia"],
+  "Distrito Federal": ["Brasília"],
+  "Ocidental do Tocantins": ["Palmas"],
+  "Oriental do Tocantins": ["Palmas"],
+  "Leste Rondoniense": ["Porto Velho"],
+  "Madeira-Guaporé": ["Porto Velho"],
+};
+
+// ===================== INMET RSS =====================
+async function fetchINMETAlerts() {
+  try {
+    console.log("🔍 Buscando alertas do INMET...");
+    const r = await fetch("https://apiprevmet3.inmet.gov.br/avisos/rss");
+    if (!r.ok) {
+      console.error(`❌ INMET RSS retornou ${r.status}`);
+      return [];
+    }
+    
+    const xml = await r.text();
+    const alerts = parseINMETRSS(xml);
+    console.log(`✅ ${alerts.length} alertas encontrados no INMET`);
+    return alerts;
+  } catch (e) {
+    console.error("❌ Erro ao buscar INMET:", e.message);
+    return [];
+  }
+}
+
+function parseINMETRSS(xml) {
+  const alerts = [];
+  const items = xml.split("<item>");
+  
+  for (let i = 1; i < items.length; i++) {
+    const item = items[i];
+    
+    const titleMatch = item.match(/<title>(.*?)<\/title>/);
+    const descMatch = item.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/s);
+    const linkMatch = item.match(/<link>(.*?)<\/link>/);
+    const guidMatch = item.match(/<guid>(.*?)<\/guid>/);
+    
+    if (!descMatch) continue;
+    
+    const desc = descMatch[1];
+    
+    const eventoMatch = desc.match(/<td>Evento<\/td><td>(.*?)<\/td>/);
+    const severidadeMatch = desc.match(/<td>Severidade<\/td><td>(.*?)<\/td>/);
+    const inicioMatch = desc.match(/<td>Início<\/td><td>(.*?)<\/td>/);
+    const fimMatch = desc.match(/<td>Fim<\/td><td>(.*?)<\/td>/);
+    const descricaoMatch = desc.match(/<td>Descrição<\/td><td>(.*?)<\/td>/);
+    const areaMatch = desc.match(/<td>Área<\/td><td>Aviso para as Áreas: (.*?)<\/td>/);
+    
+    if (!areaMatch) continue;
+    
+    const areas = areaMatch[1].split(",").map(a => a.trim());
+    const affectedCapitals = new Set();
+    
+    for (const area of areas) {
+      const capitals = INMET_TO_CAPITAL[area];
+      if (capitals) {
+        capitals.forEach(cap => affectedCapitals.add(cap));
+      }
+    }
+    
+    if (affectedCapitals.size === 0) continue;
+    
+    alerts.push({
+      id: guidMatch ? guidMatch[1] : linkMatch[1],
+      evento: eventoMatch ? eventoMatch[1] : "Alerta",
+      severidade: severidadeMatch ? severidadeMatch[1] : "Desconhecida",
+      inicio: inicioMatch ? inicioMatch[1] : "",
+      fim: fimMatch ? fimMatch[1] : "",
+      descricao: descricaoMatch ? descricaoMatch[1] : "",
+      link: linkMatch ? linkMatch[1] : "",
+      capitais: Array.from(affectedCapitals),
+    });
+  }
+  
+  return alerts;
+}
+
+function normalizeSeverity(s) {
+  const x = (s || "").toString().toLowerCase();
+  if (x.includes("perigo") && !x.includes("potencial")) return "red";
+  if (x.includes("potencial")) return "yellow";
+  return "unknown";
+}
+
 // ===================== TOMORROW.IO =====================
 function forecastUrl(lat, lon) {
   return `https://api.tomorrow.io/v4/weather/forecast?location=${lat},${lon}&timesteps=1h&apikey=${TOMORROW_API_KEY}`;
-}
-
-function alertsUrl(lat, lon) {
-  return `https://api.tomorrow.io/v4/weather/alerts?location=${lat},${lon}&apikey=${TOMORROW_API_KEY}`;
 }
 
 function extractHeavyRainHours(forecastJson) {
   const timelines = forecastJson?.timelines || [];
   let hourly = [];
   
-  // Procura pela timeline horária
   for (const timeline of timelines) {
     if (timeline.timestep === "1h" || timeline.timestep === "1hour") {
       hourly = timeline.intervals || [];
@@ -187,10 +390,7 @@ function extractHeavyRainHours(forecastJson) {
     }
   }
   
-  if (hourly.length === 0) {
-    console.log("⚠️ Nenhum dado horário encontrado na resposta");
-    return [];
-  }
+  if (hourly.length === 0) return [];
 
   const now = Date.now();
   const limit = now + HORIZON_HOURS * 3600 * 1000;
@@ -214,90 +414,66 @@ function extractHeavyRainHours(forecastJson) {
   return hits;
 }
 
-function normalizeSeverity(s) {
-  const x = (s || "").toString().toLowerCase();
-  if (x.includes("red") || x.includes("vermelh") || x.includes("extreme")) return "red";
-  if (x.includes("orange") || x.includes("laranj") || x.includes("severe")) return "orange";
-  if (x.includes("yellow") || x.includes("amarel") || x.includes("moderate")) return "yellow";
-  return x || "unknown";
-}
-
-function summarizeAlert(a, cityLabel) {
-  const sev = normalizeSeverity(a?.severity);
-  const event = a?.event || a?.eventType || "Alerta meteorológico";
-  const desc = a?.description || "";
-  
-  const end = a?.timeEnd || a?.expiresTime || a?.expires || a?.ends || null;
-  const endTxt = end
-    ? new Date(end).toLocaleTimeString("pt-BR", {
-        hour: "2-digit",
-        minute: "2-digit",
-        day: "2-digit",
-        month: "2-digit",
-      })
-    : "em aberto";
-
-  let text = `🚨 <b>ALERTA ${sev.toUpperCase()}</b> — ${cityLabel}\n`;
-  text += `📍 Evento: ${event}\n`;
-  if (desc && desc.length < 200) text += `ℹ️ ${desc}\n`;
-  text += `⏰ Válido até: ${endTxt}`;
-  
-  return { sev, text };
-}
-
 // ===================== PROCESSAMENTO =====================
-async function processAlertsForCity(city) {
-  try {
-    console.log(`🔍 Verificando alertas para ${city.name}...`);
-    const r = await fetch(alertsUrl(city.lat, city.lon));
-    
-    if (!r.ok) {
-      console.log(`❌ API retornou status ${r.status} para ${city.name}`);
-      return;
-    }
-    
-    const data = await r.json();
-    const alerts = data?.alerts || data?.data?.alerts || data?.data || [];
-    
-    if (!Array.isArray(alerts) || alerts.length === 0) {
-      console.log(`✅ Nenhum alerta para ${city.name}`);
-      return;
-    }
-    
-    console.log(`⚠️ ${alerts.length} alerta(s) encontrado(s) para ${city.name}`);
-    
-    for (const a of alerts) {
-      const alertKey = `alert_${city.name}_${a?.event || 'unknown'}_${a?.severity || 'unknown'}`;
+async function processINMETAlerts() {
+  const alerts = await fetchINMETAlerts();
+  let sentCount = 0;
+  
+  for (const alert of alerts) {
+    for (const cityName of alert.capitais) {
+      const alertKey = `inmet_${cityName}_${alert.id}`;
       
       if (wasAlertSent(alertKey)) {
-        console.log(`⏭️ Alerta já enviado hoje: ${alertKey}`);
+        console.log(`⏭️ Alerta INMET já enviado: ${cityName} - ${alert.evento}`);
         continue;
       }
       
-      const { sev, text } = summarizeAlert(a, city.name.toUpperCase());
-      const sent = await tgSend(text);
+      const sev = normalizeSeverity(alert.severidade);
+      const emoji = sev === "red" ? "🔴" : sev === "yellow" ? "🟡" : "⚠️";
+      
+      let msg = `${emoji} <b>ALERTA INMET</b> — ${cityName.toUpperCase()}\n`;
+      msg += `📋 Evento: ${alert.evento}\n`;
+      msg += `🎯 Severidade: ${alert.severidade}\n`;
+      if (alert.fim) {
+        const fimDate = new Date(alert.fim.replace(" ", "T"));
+        msg += `⏰ Válido até: ${fimDate.toLocaleString("pt-BR", { 
+          day: "2-digit", 
+          month: "2-digit", 
+          hour: "2-digit", 
+          minute: "2-digit" 
+        })}\n`;
+      }
+      if (alert.descricao && alert.descricao.length < 250) {
+        msg += `ℹ️ ${alert.descricao}\n`;
+      }
+      msg += `\n🔗 <a href="${alert.link}">Ver detalhes</a>`;
+      
+      const sent = await tgSend(msg);
       
       if (sent?.ok) {
         markAlertSent(alertKey);
-        addCityToday(city.name);
+        addCityToday(cityName);
+        sentCount++;
         
         if (sev === "red" && sent?.result?.message_id) {
           await tgPin(sent.result.message_id);
         }
         
-        console.log(`✉️ Alerta enviado: ${city.name} (${sev})`);
+        console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento}`);
       }
       
-      await sleep(600);
+      await sleep(800);
     }
-  } catch (e) {
-    console.error(`❌ Erro ao processar alertas de ${city.name}:`, e.message);
   }
+  
+  return sentCount;
 }
 
 async function processRainForCity(city) {
+  if (!TOMORROW_API_KEY) return;
+  
   try {
-    console.log(`🌧️ Verificando chuva para ${city.name}...`);
+    console.log(`🌧️ Verificando chuva Tomorrow.io para ${city.name}...`);
     const r = await fetch(forecastUrl(city.lat, city.lon));
     
     if (!r.ok) {
@@ -342,27 +518,29 @@ async function processRainForCity(city) {
 // ===================== EXECUÇÕES =====================
 async function monitorRun() {
   console.log(`\n🚀 Iniciando monitoramento às ${new Date().toLocaleString('pt-BR')}`);
-  let alertsCount = 0;
-  let rainCount = 0;
   
-  for (const c of CAPITALS) {
-    console.log(`\n--- Processando: ${c.name} (${c.uf}) ---`);
+  // PRIORIDADE 1: INMET (oficial)
+  console.log("\n=== FASE 1: Alertas INMET (oficial) ===");
+  const inmetCount = await processINMETAlerts();
+  console.log(`✅ ${inmetCount} alertas INMET enviados`);
+  
+  // PRIORIDADE 2: Tomorrow.io (previsão de chuva) - apenas se não houver alertas INMET
+  if (TOMORROW_API_KEY) {
+    console.log("\n=== FASE 2: Previsão de chuva (Tomorrow.io) ===");
+    let rainCount = 0;
     
-    const beforeAlerts = loadState().cities.length;
-    await processAlertsForCity(c);
-    const afterAlerts = loadState().cities.length;
-    if (afterAlerts > beforeAlerts) alertsCount++;
+    for (const c of CAPITALS) {
+      const beforeRain = loadState().cities.length;
+      await processRainForCity(c);
+      const afterRain = loadState().cities.length;
+      if (afterRain > beforeRain) rainCount++;
+      await sleep(API_DELAY);
+    }
     
-    const beforeRain = loadState().cities.length;
-    await processRainForCity(c);
-    const afterRain = loadState().cities.length;
-    if (afterRain > beforeRain) rainCount++;
-    
-    await sleep(API_DELAY);
+    console.log(`✅ ${rainCount} previsões de chuva enviadas`);
   }
   
   console.log(`\n✅ Monitor concluído às ${new Date().toLocaleString('pt-BR')}`);
-  console.log(`📊 Resumo: ${alertsCount} alertas, ${rainCount} previsões de chuva`);
 }
 
 async function dailySummary() {
@@ -389,10 +567,6 @@ async function dailySummary() {
 async function main() {
   if (!TOKEN) {
     throw new Error("❌ Falta TELEGRAM_BOT_TOKEN");
-  }
-  
-  if (!TOMORROW_API_KEY && RUN_MODE !== "daily") {
-    throw new Error("❌ Falta TOMORROW_API_KEY");
   }
 
   if (RUN_MODE === "daily") {
