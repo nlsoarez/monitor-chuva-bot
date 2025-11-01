@@ -331,16 +331,21 @@ function parseINMETRSS(xml) {
     
     const desc = descMatch[1];
     
-    const eventoMatch = desc.match(/<td>Evento<\/td><td>(.*?)<\/td>/);
-    const severidadeMatch = desc.match(/<td>Severidade<\/td><td>(.*?)<\/td>/);
-    const inicioMatch = desc.match(/<td>Início<\/td><td>(.*?)<\/td>/);
-    const fimMatch = desc.match(/<td>Fim<\/td><td>(.*?)<\/td>/);
-    const descricaoMatch = desc.match(/<td>Descrição<\/td><td>(.*?)<\/td>/);
-    const areaMatch = desc.match(/<td>Área<\/td><td>Aviso para as Áreas: (.*?)<\/td>/);
+    const eventoMatch = desc.match(/<th[^>]*>Evento<\/th><td>(.*?)<\/td>/);
+    const severidadeMatch = desc.match(/<th[^>]*>Severidade<\/th><td>(.*?)<\/td>/);
+    const inicioMatch = desc.match(/<th[^>]*>Início<\/th><td>(.*?)<\/td>/);
+    const fimMatch = desc.match(/<th[^>]*>Fim<\/th><td>(.*?)<\/td>/);
+    const descricaoMatch = desc.match(/<th[^>]*>Descrição<\/th><td>(.*?)<\/td>/);
+    const areaMatch = desc.match(/<th[^>]*>Área<\/th><td>(.*?)<\/td>/);
     
     if (!areaMatch) continue;
     
-    const areas = areaMatch[1].split(",").map(a => a.trim());
+    // Remove "Aviso para as Áreas: " se existir
+    let areasText = areaMatch[1];
+    if (areasText.includes("Aviso para as Áreas:")) {
+      areasText = areasText.replace("Aviso para as Áreas:", "").trim();
+    }
+    const areas = areasText.split(",").map(a => a.trim());
     const affectedCapitals = new Set();
     
     for (const area of areas) {
