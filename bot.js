@@ -451,10 +451,11 @@ async function processINMETAlerts() {
   
   for (const alert of alerts) {
     for (const cityName of alert.capitais) {
-      const alertKey = `inmet_${cityName}_${alert.id}`;
+      // Gerar chave única baseada no ID do alerta + cidade
+      const alertKey = `inmet_${alert.id}_${cityName}`;
       
       if (wasAlertSent(alertKey)) {
-        console.log(`⏭️ Alerta INMET já enviado: ${cityName} - ${alert.evento}`);
+        console.log(`⏭️ Alerta INMET já enviado: ${cityName} - ${alert.evento} (${alert.id})`);
         continue;
       }
       
@@ -485,11 +486,14 @@ async function processINMETAlerts() {
         addCityToday(cityName);
         sentCount++;
         
+        console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento}`);
+        console.log(`   Cache key: ${alertKey}`);
+        
         if (sev === "red" && sent?.result?.message_id) {
           await tgPin(sent.result.message_id);
         }
-        
-        console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento}`);
+      } else {
+        console.log(`❌ Falha ao enviar para ${cityName}: ${sent?.description || 'erro desconhecido'}`);
       }
       
       await sleep(800);
