@@ -16,14 +16,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ===================== PERSISTÊNCIA =====================
 const dataDir = path.join(process.cwd(), "data");
-const cacheDir = path.join(process.cwd(), ".cache");
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const stateFile = (d = todayStr()) => path.join(dataDir, `${d}.json`);
-const alertsCacheFile = () => path.join(cacheDir, "alerts.json");
+const alertsCacheFile = () => path.join(dataDir, "alerts-cache.json");
 
 function ensureData() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
   if (!fs.existsSync(stateFile()))
     fs.writeFileSync(stateFile(), JSON.stringify({ cities: [], closed: false }, null, 2));
   if (!fs.existsSync(alertsCacheFile()))
@@ -340,7 +338,6 @@ function parseINMETRSS(xml) {
     
     if (!areaMatch) continue;
     
-    // Remove "Aviso para as Áreas: " se existir
     let areasText = areaMatch[1];
     if (areasText.includes("Aviso para as Áreas:")) {
       areasText = areasText.replace("Aviso para as Áreas:", "").trim();
