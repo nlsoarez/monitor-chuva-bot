@@ -1,4 +1,20 @@
 {
-  "cities": [],
+  "cities": [
+    "Goiânia",
+    "Palmas",
+    "Cuiabá",
+    "Belo Horizonte",
+    "Vitória",
+    "Belém",
+    "Porto Velho",
+    "Boa Vista",
+    "São Luís",
+    "Manaus",
+    "Salvador",
+    "Brasília",
+    "Curitiba",
+    "São Paulo",
+    "Campo Grande"
+  ],
   "closed": false
 }
