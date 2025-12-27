@@ -142,27 +142,43 @@ function rollTomorrow() {
 }
 
 // ===================== TELEGRAM =====================
-async function tgSend(text, html = true) {
-  try {
-    const r = await fetchWithRetry(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text,
-        parse_mode: html ? "HTML" : undefined,
-        disable_web_page_preview: true,
-      }),
-    });
-    const result = await r.json();
-    if (!result.ok) {
-      console.error("❌ Telegram API error:", result.description || JSON.stringify(result));
+async function tgSend(text, html = true, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const r = await fetchWithTimeout(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: CHAT_ID,
+          text,
+          parse_mode: html ? "HTML" : undefined,
+          disable_web_page_preview: true,
+        }),
+      });
+      const result = await r.json();
+
+      // Rate limiting - respeitar retry_after
+      if (!result.ok && result.error_code === 429) {
+        const retryAfter = (result.parameters?.retry_after || 30) + 1;
+        console.log(`⏳ Rate limit Telegram. Aguardando ${retryAfter}s (tentativa ${attempt}/${retries})...`);
+        await sleep(retryAfter * 1000);
+        continue;
+      }
+
+      if (!result.ok) {
+        console.error("❌ Telegram API error:", result.description || JSON.stringify(result));
+      }
+      return result;
+    } catch (e) {
+      console.error("❌ Erro ao enviar mensagem:", e.message);
+      if (attempt < retries) {
+        await sleep(2000);
+        continue;
+      }
+      return null;
     }
-    return result;
-  } catch (e) {
-    console.error("❌ Erro ao enviar mensagem:", e.message);
-    return null;
   }
+  return null;
 }
 
 async function tgPin(message_id) {
@@ -626,19 +642,20 @@ async function monitorRun() {
   const inmetCount = await processINMETAlerts();
   console.log(`✅ ${inmetCount} alertas INMET enviados`);
   
-  // PRIORIDADE 2: Tomorrow.io (previsão de chuva) - apenas se não houver alertas INMET
+  // PRIORIDADE 2: Tomorrow.io (previsão de chuva) - limitado a RJ e SP para evitar rate limit
   if (TOMORROW_API_KEY) {
     console.log("\n=== FASE 2: Previsão de chuva (Tomorrow.io) ===");
+    const priorityCities = CAPITALS.filter(c => c.name === "Rio de Janeiro" || c.name === "São Paulo");
     let rainCount = 0;
-    
-    for (const c of CAPITALS) {
+
+    for (const c of priorityCities) {
       const beforeRain = loadState().cities.length;
       await processRainForCity(c);
       const afterRain = loadState().cities.length;
       if (afterRain > beforeRain) rainCount++;
       await sleep(API_DELAY);
     }
-    
+
     console.log(`✅ ${rainCount} previsões de chuva enviadas`);
   }
   
