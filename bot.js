@@ -650,20 +650,28 @@ async function dailySummary() {
   console.log(`✅ Resumo enviado. ${cities.length} cidades com alertas.`);
 }
 
-// ===================== MAIN =====================
-async function main() {
-  console.log("═══════════════════════════════════════════════════════════");
-  console.log("🤖 Monitor Chuva Bot - Iniciando");
-  console.log("═══════════════════════════════════════════════════════════");
-  console.log(`📅 Data/Hora: ${new Date().toISOString()}`);
-  console.log(`🔧 Modo: ${RUN_MODE}`);
+// ===================== INICIALIZAÇÃO =====================
+function initBot() {
   console.log(`🔑 Token Telegram: ${TOKEN ? "✅ Configurado" : "❌ NÃO CONFIGURADO"}`);
   console.log(`🌤️ API Tomorrow.io: ${TOMORROW_API_KEY ? "✅ Configurado" : "⚠️ Não configurado (opcional)"}`);
-  console.log("═══════════════════════════════════════════════════════════\n");
 
   if (!TOKEN) {
     throw new Error("❌ Falta TELEGRAM_BOT_TOKEN - configure a variável de ambiente");
   }
+
+  ensureData();
+  console.log("✅ Bot inicializado com sucesso");
+}
+
+// ===================== MAIN (execução direta) =====================
+async function main() {
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("🤖 Monitor Chuva Bot - Execução Direta");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log(`📅 Data/Hora: ${new Date().toISOString()}`);
+  console.log(`🔧 Modo: ${RUN_MODE}`);
+
+  initBot();
 
   if (RUN_MODE === "daily") {
     await dailySummary();
@@ -676,15 +684,23 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════════");
 }
 
-main().catch(async (e) => {
-  console.error("❌ ERRO FATAL:", e.message);
-  console.error(e.stack);
-  
-  try {
-    await tgSend(`❌ <b>Erro no Monitor</b>\n\n${e.message}`, true);
-  } catch (telegramError) {
-    console.error("❌ Não foi possível enviar erro ao Telegram:", telegramError.message);
-  }
-  
-  process.exit(1);
-});
+// Só executa main() se for chamado diretamente (não quando importado)
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+
+if (isMainModule) {
+  main().catch(async (e) => {
+    console.error("❌ ERRO FATAL:", e.message);
+    console.error(e.stack);
+
+    try {
+      await tgSend(`❌ <b>Erro no Monitor</b>\n\n${e.message}`, true);
+    } catch (telegramError) {
+      console.error("❌ Não foi possível enviar erro ao Telegram:", telegramError.message);
+    }
+
+    process.exit(1);
+  });
+}
+
+// ===================== EXPORTS =====================
+export { monitorRun, dailySummary, initBot };
