@@ -350,7 +350,10 @@ async function fetchINMETAlerts() {
       return [];
     }
 
-    const xml = await r.text();
+    // Forçar decodificação como UTF-8 para evitar problemas de encoding
+    // O INMET envia UTF-8, mas sem charset no Content-Type, causando má interpretação
+    const buffer = await r.arrayBuffer();
+    const xml = new TextDecoder("utf-8").decode(buffer);
 
     if (!xml || xml.length < 100) {
       console.error("❌ Resposta do INMET vazia ou muito pequena");
