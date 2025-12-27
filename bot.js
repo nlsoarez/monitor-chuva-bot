@@ -556,58 +556,77 @@ function extractHeavyRainHours(forecastJson) {
 async function processINMETAlerts() {
   const alerts = await fetchINMETAlerts();
   let sentCount = 0;
-  
+
+  // Agrupar alertas por cidade e manter apenas o mais severo
+  const alertsByCity = new Map();
+
   for (const alert of alerts) {
+    const sev = normalizeSeverity(alert.severidade);
+    const sevPriority = sev === "red" ? 3 : sev === "yellow" ? 2 : 1;
+
     for (const cityName of alert.capitais) {
-      // Gerar chave única baseada no ID do alerta + cidade
-      const alertKey = `inmet_${alert.id}_${cityName}`;
-      
-      if (wasAlertSent(alertKey)) {
-        console.log(`⏭️ Alerta INMET já enviado: ${cityName} - ${alert.evento} (${alert.id})`);
-        continue;
+      const existing = alertsByCity.get(cityName);
+
+      if (!existing || sevPriority > existing.priority) {
+        alertsByCity.set(cityName, {
+          alert,
+          priority: sevPriority,
+          sev
+        });
       }
-      
-      const sev = normalizeSeverity(alert.severidade);
-      const emoji = sev === "red" ? "🔴" : sev === "yellow" ? "🟡" : "⚠️";
-      
-      let msg = `${emoji} <b>ALERTA INMET</b> — ${cityName.toUpperCase()}\n`;
-      msg += `📋 Evento: ${alert.evento}\n`;
-      msg += `🎯 Severidade: ${alert.severidade}\n`;
-      if (alert.fim) {
-        const fimDate = new Date(alert.fim.replace(" ", "T"));
-        msg += `⏰ Válido até: ${fimDate.toLocaleString("pt-BR", { 
-          day: "2-digit", 
-          month: "2-digit", 
-          hour: "2-digit", 
-          minute: "2-digit" 
-        })}\n`;
-      }
-      if (alert.descricao && alert.descricao.length < 250) {
-        msg += `ℹ️ ${alert.descricao}\n`;
-      }
-      msg += `\n🔗 <a href="${alert.link}">Ver detalhes</a>`;
-      
-      const sent = await tgSend(msg);
-      
-      if (sent?.ok) {
-        markAlertSent(alertKey);
-        addCityToday(cityName);
-        sentCount++;
-        
-        console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento}`);
-        console.log(`   Cache key: ${alertKey}`);
-        
-        if (sev === "red" && sent?.result?.message_id) {
-          await tgPin(sent.result.message_id);
-        }
-      } else {
-        console.log(`❌ Falha ao enviar para ${cityName}: ${sent?.description || 'erro desconhecido'}`);
-      }
-      
-      await sleep(800);
     }
   }
-  
+
+  console.log(`📊 ${alertsByCity.size} cidades com alertas (de ${alerts.length} alertas totais)`);
+
+  // Enviar apenas o alerta mais severo por cidade
+  for (const [cityName, { alert, sev }] of alertsByCity) {
+    // Usar chave por cidade + data (não por alerta individual)
+    const alertKey = `inmet_${cityName}_${todayStr()}`;
+
+    if (wasAlertSent(alertKey)) {
+      console.log(`⏭️ Alerta INMET já enviado hoje: ${cityName}`);
+      continue;
+    }
+
+    const emoji = sev === "red" ? "🔴" : sev === "yellow" ? "🟡" : "⚠️";
+
+    let msg = `${emoji} <b>ALERTA INMET</b> — ${cityName.toUpperCase()}\n`;
+    msg += `📋 Evento: ${alert.evento}\n`;
+    msg += `🎯 Severidade: ${alert.severidade}\n`;
+    if (alert.fim) {
+      const fimDate = new Date(alert.fim.replace(" ", "T"));
+      msg += `⏰ Válido até: ${fimDate.toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      })}\n`;
+    }
+    if (alert.descricao && alert.descricao.length < 250) {
+      msg += `ℹ️ ${alert.descricao}\n`;
+    }
+    msg += `\n🔗 <a href="${alert.link}">Ver detalhes</a>`;
+
+    const sent = await tgSend(msg);
+
+    if (sent?.ok) {
+      markAlertSent(alertKey);
+      addCityToday(cityName);
+      sentCount++;
+
+      console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento} (${alert.severidade})`);
+
+      if (sev === "red" && sent?.result?.message_id) {
+        await tgPin(sent.result.message_id);
+      }
+    } else {
+      console.log(`❌ Falha ao enviar para ${cityName}: ${sent?.description || 'erro desconhecido'}`);
+    }
+
+    await sleep(800);
+  }
+
   return sentCount;
 }
 
