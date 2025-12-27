@@ -350,7 +350,10 @@ async function fetchINMETAlerts() {
       return [];
     }
 
-    const xml = await r.text();
+    // Forçar decodificação como UTF-8 para evitar problemas de encoding
+    // O INMET envia UTF-8, mas sem charset no Content-Type, causando má interpretação
+    const buffer = await r.arrayBuffer();
+    const xml = new TextDecoder("utf-8").decode(buffer);
 
     if (!xml || xml.length < 100) {
       console.error("❌ Resposta do INMET vazia ou muito pequena");
@@ -463,28 +466,40 @@ function forecastUrl(lat, lon) {
 }
 
 function extractHeavyRainHours(forecastJson) {
-  const timelines = forecastJson?.timelines || [];
   let hourly = [];
-  
-  for (const timeline of timelines) {
-    if (timeline.timestep === "1h" || timeline.timestep === "1hour") {
-      hourly = timeline.intervals || [];
-      break;
+
+  // Novo formato da API v4: timelines é um objeto com hourly/daily
+  if (forecastJson?.timelines?.hourly) {
+    hourly = forecastJson.timelines.hourly;
+  }
+  // Formato antigo: timelines é um array
+  else if (Array.isArray(forecastJson?.timelines)) {
+    for (const timeline of forecastJson.timelines) {
+      if (timeline.timestep === "1h" || timeline.timestep === "1hour") {
+        hourly = timeline.intervals || [];
+        break;
+      }
     }
   }
-  
-  if (hourly.length === 0) return [];
+
+  if (hourly.length === 0) {
+    console.log("   ⚠️ Nenhum dado horário encontrado na resposta");
+    return [];
+  }
 
   const now = Date.now();
   const limit = now + HORIZON_HOURS * 3600 * 1000;
   const hits = [];
 
   for (const interval of hourly) {
-    const t = new Date(interval?.startTime).getTime();
+    // Novo formato usa "time", antigo usa "startTime"
+    const timeStr = interval?.time || interval?.startTime;
+    const t = new Date(timeStr).getTime();
     if (!t || t > limit) continue;
-    
+
+    // Novo formato usa "values.precipitationIntensity" diretamente
     const precip = Number(interval?.values?.precipitationIntensity ?? 0);
-    
+
     if (precip >= THRESHOLD_MM_H) {
       const hh = new Date(t).toLocaleTimeString("pt-BR", {
         hour: "2-digit",
@@ -493,7 +508,7 @@ function extractHeavyRainHours(forecastJson) {
       hits.push({ time: hh, value: precip });
     }
   }
-  
+
   return hits;
 }
 
