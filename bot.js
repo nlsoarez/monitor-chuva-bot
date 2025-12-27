@@ -3,8 +3,12 @@ import fs from "fs";
 import path from "path";
 
 // ===================== CONFIG GERAL =====================
-const CHAT_ID = -1003065918727;
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// WhatsApp via Evolution API
+const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || "https://evolution-api-production-b976.up.railway.app";
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "Monitor de chuvas";
+const WHATSAPP_GROUP_ID = process.env.WHATSAPP_GROUP_ID || "120363422418031048@g.us";
+
 const TOMORROW_API_KEY = process.env.TOMORROW_API_KEY;
 const RUN_MODE = process.env.RUN_MODE || "monitor";
 
@@ -141,36 +145,57 @@ function rollTomorrow() {
     fs.writeFileSync(f, JSON.stringify({ cities: [], closed: false }, null, 2));
 }
 
-// ===================== TELEGRAM =====================
-async function tgSend(text, html = true, retries = 3) {
+// ===================== WHATSAPP (Evolution API) =====================
+function htmlToWhatsApp(html) {
+  // Converte formatação HTML para WhatsApp
+  return html
+    .replace(/<b>(.*?)<\/b>/gi, "*$1*")      // bold
+    .replace(/<strong>(.*?)<\/strong>/gi, "*$1*")
+    .replace(/<i>(.*?)<\/i>/gi, "_$1_")      // italic
+    .replace(/<em>(.*?)<\/em>/gi, "_$1_")
+    .replace(/<code>(.*?)<\/code>/gi, "```$1```")
+    .replace(/<a href="(.*?)">(.*?)<\/a>/gi, "$2: $1")  // links
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]*>/g, "");                // remove outras tags
+}
+
+async function sendMessage(text, isHtml = true, retries = 3) {
+  // Converte HTML para formatação WhatsApp
+  const message = isHtml ? htmlToWhatsApp(text) : text;
+
+  const url = `${EVOLUTION_API_URL}/message/sendText/${encodeURIComponent(EVOLUTION_INSTANCE)}`;
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const r = await fetchWithTimeout(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+      const r = await fetchWithTimeout(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": EVOLUTION_API_KEY,
+        },
         body: JSON.stringify({
-          chat_id: CHAT_ID,
-          text,
-          parse_mode: html ? "HTML" : undefined,
-          disable_web_page_preview: true,
+          number: WHATSAPP_GROUP_ID,
+          text: message,
         }),
       });
+
       const result = await r.json();
 
-      // Rate limiting - respeitar retry_after
-      if (!result.ok && result.error_code === 429) {
-        const retryAfter = (result.parameters?.retry_after || 30) + 1;
-        console.log(`⏳ Rate limit Telegram. Aguardando ${retryAfter}s (tentativa ${attempt}/${retries})...`);
+      if (r.status === 429) {
+        const retryAfter = 30;
+        console.log(`⏳ Rate limit WhatsApp. Aguardando ${retryAfter}s (tentativa ${attempt}/${retries})...`);
         await sleep(retryAfter * 1000);
         continue;
       }
 
-      if (!result.ok) {
-        console.error("❌ Telegram API error:", result.description || JSON.stringify(result));
+      if (!r.ok) {
+        console.error("❌ Evolution API error:", result.message || JSON.stringify(result));
+        return { ok: false, description: result.message };
       }
-      return result;
+
+      return { ok: true, result };
     } catch (e) {
-      console.error("❌ Erro ao enviar mensagem:", e.message);
+      console.error("❌ Erro ao enviar mensagem WhatsApp:", e.message);
       if (attempt < retries) {
         await sleep(2000);
         continue;
@@ -181,14 +206,13 @@ async function tgSend(text, html = true, retries = 3) {
   return null;
 }
 
+// Alias para compatibilidade (substitui tgSend)
+const tgSend = sendMessage;
+
+// WhatsApp não tem pin nativo via Evolution API
 async function tgPin(message_id) {
-  try {
-    await fetchWithRetry(
-      `https://api.telegram.org/bot${TOKEN}/pinChatMessage?chat_id=${CHAT_ID}&message_id=${message_id}&disable_notification=false`
-    );
-  } catch (e) {
-    console.error("❌ Erro ao fixar mensagem:", e.message);
-  }
+  // Não implementado para WhatsApp
+  console.log("ℹ️ Pin não disponível para WhatsApp");
 }
 
 // ===================== CIDADES (capitais) =====================
@@ -684,11 +708,14 @@ async function dailySummary() {
 
 // ===================== INICIALIZAÇÃO =====================
 function initBot() {
-  console.log(`🔑 Token Telegram: ${TOKEN ? "✅ Configurado" : "❌ NÃO CONFIGURADO"}`);
+  console.log(`📱 WhatsApp Evolution API: ${EVOLUTION_API_KEY ? "✅ Configurado" : "❌ NÃO CONFIGURADO"}`);
+  console.log(`🔗 URL: ${EVOLUTION_API_URL}`);
+  console.log(`📋 Instância: ${EVOLUTION_INSTANCE}`);
+  console.log(`👥 Grupo: ${WHATSAPP_GROUP_ID}`);
   console.log(`🌤️ API Tomorrow.io: ${TOMORROW_API_KEY ? "✅ Configurado" : "⚠️ Não configurado (opcional)"}`);
 
-  if (!TOKEN) {
-    throw new Error("❌ Falta TELEGRAM_BOT_TOKEN - configure a variável de ambiente");
+  if (!EVOLUTION_API_KEY) {
+    throw new Error("❌ Falta EVOLUTION_API_KEY - configure a variável de ambiente");
   }
 
   ensureData();
@@ -726,8 +753,8 @@ if (isMainModule) {
 
     try {
       await tgSend(`❌ <b>Erro no Monitor</b>\n\n${e.message}`, true);
-    } catch (telegramError) {
-      console.error("❌ Não foi possível enviar erro ao Telegram:", telegramError.message);
+    } catch (whatsappError) {
+      console.error("❌ Não foi possível enviar erro ao WhatsApp:", whatsappError.message);
     }
 
     process.exit(1);
