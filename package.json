@@ -1,5 +1,17 @@
 {
+  "name": "monitor-chuva-bot",
+  "version": "2.0.0",
+  "description": "Bot de monitoramento de chuvas e alertas meteorológicos para capitais brasileiras",
   "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "monitor": "node bot.js",
+    "daily": "RUN_MODE=daily node bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "node-fetch": "^3.3.2"
   }
