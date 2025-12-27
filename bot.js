@@ -11,8 +11,54 @@ const RUN_MODE = process.env.RUN_MODE || "monitor";
 const HORIZON_HOURS = 6;
 const THRESHOLD_MM_H = 10;
 const API_DELAY = 350;
+const REQUEST_TIMEOUT = 30000; // 30 segundos
+const MAX_RETRIES = 3;
+
+const USER_AGENT = "MonitorChuvaBot/1.0 (https://github.com/monitor-chuva-bot)";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ===================== FETCH COM TIMEOUT E RETRY =====================
+async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "User-Agent": USER_AGENT,
+        ...options.headers,
+      },
+    });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, options);
+      return response;
+    } catch (error) {
+      lastError = error;
+      console.log(`⚠️ Tentativa ${attempt}/${retries} falhou para ${url}: ${error.message}`);
+
+      if (attempt < retries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+        console.log(`⏳ Aguardando ${delay}ms antes da próxima tentativa...`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError;
+}
 
 // ===================== PERSISTÊNCIA =====================
 const dataDir = path.join(process.cwd(), "data");
@@ -98,7 +144,7 @@ function rollTomorrow() {
 // ===================== TELEGRAM =====================
 async function tgSend(text, html = true) {
   try {
-    const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+    const r = await fetchWithRetry(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -110,22 +156,22 @@ async function tgSend(text, html = true) {
     });
     const result = await r.json();
     if (!result.ok) {
-      console.error("Telegram API error:", result);
+      console.error("❌ Telegram API error:", result.description || JSON.stringify(result));
     }
     return result;
   } catch (e) {
-    console.error("Erro ao enviar mensagem:", e.message);
+    console.error("❌ Erro ao enviar mensagem:", e.message);
     return null;
   }
 }
 
 async function tgPin(message_id) {
   try {
-    await fetch(
+    await fetchWithRetry(
       `https://api.telegram.org/bot${TOKEN}/pinChatMessage?chat_id=${CHAT_ID}&message_id=${message_id}&disable_notification=false`
     );
   } catch (e) {
-    console.error("Erro ao fixar mensagem:", e.message);
+    console.error("❌ Erro ao fixar mensagem:", e.message);
   }
 }
 
@@ -297,18 +343,28 @@ const INMET_TO_CAPITAL = {
 async function fetchINMETAlerts() {
   try {
     console.log("🔍 Buscando alertas do INMET...");
-    const r = await fetch("https://apiprevmet3.inmet.gov.br/avisos/rss");
+    const r = await fetchWithRetry("https://apiprevmet3.inmet.gov.br/avisos/rss");
+
     if (!r.ok) {
-      console.error(`❌ INMET RSS retornou ${r.status}`);
+      console.error(`❌ INMET RSS retornou status ${r.status} - ${r.statusText}`);
       return [];
     }
-    
+
     const xml = await r.text();
+
+    if (!xml || xml.length < 100) {
+      console.error("❌ Resposta do INMET vazia ou muito pequena");
+      return [];
+    }
+
     const alerts = parseINMETRSS(xml);
-    console.log(`✅ ${alerts.length} alertas encontrados no INMET`);
+    console.log(`✅ ${alerts.length} alertas de chuva encontrados no INMET (de ${xml.length} bytes)`);
     return alerts;
   } catch (e) {
     console.error("❌ Erro ao buscar INMET:", e.message);
+    if (e.name === "AbortError") {
+      console.error("   ⏱️ Timeout na requisição - INMET pode estar lento ou inacessível");
+    }
     return [];
   }
 }
@@ -502,16 +558,16 @@ async function processINMETAlerts() {
 
 async function processRainForCity(city) {
   if (!TOMORROW_API_KEY) return;
-  
+
   try {
     console.log(`🌧️ Verificando chuva Tomorrow.io para ${city.name}...`);
-    const r = await fetch(forecastUrl(city.lat, city.lon));
-    
+    const r = await fetchWithRetry(forecastUrl(city.lat, city.lon));
+
     if (!r.ok) {
-      console.log(`❌ API retornou status ${r.status} para ${city.name}`);
+      console.log(`❌ Tomorrow.io retornou status ${r.status} para ${city.name}`);
       return;
     }
-    
+
     const data = await r.json();
     const hours = extractHeavyRainHours(data);
     
@@ -596,8 +652,17 @@ async function dailySummary() {
 
 // ===================== MAIN =====================
 async function main() {
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("🤖 Monitor Chuva Bot - Iniciando");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log(`📅 Data/Hora: ${new Date().toISOString()}`);
+  console.log(`🔧 Modo: ${RUN_MODE}`);
+  console.log(`🔑 Token Telegram: ${TOKEN ? "✅ Configurado" : "❌ NÃO CONFIGURADO"}`);
+  console.log(`🌤️ API Tomorrow.io: ${TOMORROW_API_KEY ? "✅ Configurado" : "⚠️ Não configurado (opcional)"}`);
+  console.log("═══════════════════════════════════════════════════════════\n");
+
   if (!TOKEN) {
-    throw new Error("❌ Falta TELEGRAM_BOT_TOKEN");
+    throw new Error("❌ Falta TELEGRAM_BOT_TOKEN - configure a variável de ambiente");
   }
 
   if (RUN_MODE === "daily") {
@@ -605,6 +670,10 @@ async function main() {
   } else {
     await monitorRun();
   }
+
+  console.log("\n═══════════════════════════════════════════════════════════");
+  console.log("✅ Monitor Chuva Bot - Finalizado com sucesso");
+  console.log("═══════════════════════════════════════════════════════════");
 }
 
 main().catch(async (e) => {
