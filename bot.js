@@ -101,30 +101,83 @@ function loadAlertCache() {
   }
 }
 
+// Cache em memória: cidade -> máxima severidade enviada hoje (1=unknown, 2=yellow, 3=red)
+const memoryCacheSeverity = new Map();
+let memoryCacheDate = todayStr();
+
+function clearMemoryCacheIfNewDay() {
+  const today = todayStr();
+  if (today !== memoryCacheDate) {
+    console.log(`🗓️ Novo dia detectado (${memoryCacheDate} → ${today}). Limpando cache em memória.`);
+    memoryCacheSeverity.clear();
+    memoryCacheDate = today;
+  }
+}
+
 function saveAlertCache(cache) {
   ensureData();
   fs.writeFileSync(alertsCacheFile(), JSON.stringify(cache, null, 2));
 }
 
-function wasAlertSent(key) {
-  const cache = loadAlertCache();
+// Verifica se deve enviar alerta: retorna true se severidade atual é maior que a já enviada
+function shouldSendAlert(cityName, currentPriority) {
   const today = todayStr();
-  return cache.sent[key] === today;
+
+  // Verifica cache em memória primeiro
+  const memorySev = memoryCacheSeverity.get(cityName);
+  if (memorySev !== undefined && currentPriority <= memorySev) {
+    return false; // Já enviou alerta igual ou mais severo
+  }
+
+  // Verifica arquivo (backup)
+  const cache = loadAlertCache();
+  const key = `inmet_${cityName}_${today}`;
+  const fileSev = cache.sent[key];
+
+  if (fileSev !== undefined && currentPriority <= fileSev) {
+    return false; // Já enviou alerta igual ou mais severo
+  }
+
+  return true; // Nova severidade ou severidade maior - enviar!
 }
 
-function markAlertSent(key) {
-  const cache = loadAlertCache();
+// Marca alerta como enviado com sua severidade
+function markAlertSent(cityName, priority) {
   const today = todayStr();
-  cache.sent[key] = today;
-  
+  const key = `inmet_${cityName}_${today}`;
+
+  // Salva em memória
+  memoryCacheSeverity.set(cityName, priority);
+
+  // Também salva em arquivo (backup)
+  const cache = loadAlertCache();
+  cache.sent[key] = priority; // Agora guarda a severidade, não só a data
+
   const weekAgo = new Date();
   weekAgo.setDate(weekAgo.getDate() - 7);
   const cutoff = weekAgo.toISOString().slice(0, 10);
-  
+
   for (const k in cache.sent) {
-    if (cache.sent[k] < cutoff) delete cache.sent[k];
+    // Limpa entradas antigas (chaves que contêm datas antigas)
+    if (k.includes("_2") && k < `inmet_A_${cutoff}`) {
+      delete cache.sent[k];
+    }
   }
-  
+
+  saveAlertCache(cache);
+}
+
+// Compatibilidade com código antigo (para Tomorrow.io)
+function wasAlertSent(key) {
+  const cache = loadAlertCache();
+  const today = todayStr();
+  return cache.sent[key] === today || memoryCacheSeverity.has(key);
+}
+
+function markAlertSentSimple(key) {
+  const cache = loadAlertCache();
+  const today = todayStr();
+  cache.sent[key] = today;
   saveAlertCache(cache);
 }
 
@@ -556,58 +609,85 @@ function extractHeavyRainHours(forecastJson) {
 async function processINMETAlerts() {
   const alerts = await fetchINMETAlerts();
   let sentCount = 0;
-  
+
+  // Agrupar alertas por cidade e manter apenas o mais severo
+  const alertsByCity = new Map();
+
   for (const alert of alerts) {
+    const sev = normalizeSeverity(alert.severidade);
+    const sevPriority = sev === "red" ? 3 : sev === "yellow" ? 2 : 1;
+
     for (const cityName of alert.capitais) {
-      // Gerar chave única baseada no ID do alerta + cidade
-      const alertKey = `inmet_${alert.id}_${cityName}`;
-      
-      if (wasAlertSent(alertKey)) {
-        console.log(`⏭️ Alerta INMET já enviado: ${cityName} - ${alert.evento} (${alert.id})`);
-        continue;
+      const existing = alertsByCity.get(cityName);
+
+      if (!existing || sevPriority > existing.priority) {
+        alertsByCity.set(cityName, {
+          alert,
+          priority: sevPriority,
+          sev
+        });
       }
-      
-      const sev = normalizeSeverity(alert.severidade);
-      const emoji = sev === "red" ? "🔴" : sev === "yellow" ? "🟡" : "⚠️";
-      
-      let msg = `${emoji} <b>ALERTA INMET</b> — ${cityName.toUpperCase()}\n`;
-      msg += `📋 Evento: ${alert.evento}\n`;
-      msg += `🎯 Severidade: ${alert.severidade}\n`;
-      if (alert.fim) {
-        const fimDate = new Date(alert.fim.replace(" ", "T"));
-        msg += `⏰ Válido até: ${fimDate.toLocaleString("pt-BR", { 
-          day: "2-digit", 
-          month: "2-digit", 
-          hour: "2-digit", 
-          minute: "2-digit" 
-        })}\n`;
-      }
-      if (alert.descricao && alert.descricao.length < 250) {
-        msg += `ℹ️ ${alert.descricao}\n`;
-      }
-      msg += `\n🔗 <a href="${alert.link}">Ver detalhes</a>`;
-      
-      const sent = await tgSend(msg);
-      
-      if (sent?.ok) {
-        markAlertSent(alertKey);
-        addCityToday(cityName);
-        sentCount++;
-        
-        console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento}`);
-        console.log(`   Cache key: ${alertKey}`);
-        
-        if (sev === "red" && sent?.result?.message_id) {
-          await tgPin(sent.result.message_id);
-        }
-      } else {
-        console.log(`❌ Falha ao enviar para ${cityName}: ${sent?.description || 'erro desconhecido'}`);
-      }
-      
-      await sleep(800);
     }
   }
-  
+
+  console.log(`📊 ${alertsByCity.size} cidades com alertas (de ${alerts.length} alertas totais)`);
+
+  // Enviar apenas o alerta mais severo por cidade (ou se severidade aumentou)
+  for (const [cityName, { alert, sev, priority }] of alertsByCity) {
+    const sevPriority = priority;
+
+    // Verifica se deve enviar: novo alerta ou severidade maior que a já enviada
+    if (!shouldSendAlert(cityName, sevPriority)) {
+      console.log(`⏭️ Alerta INMET já enviado hoje (sev=${sevPriority}): ${cityName}`);
+      continue;
+    }
+
+    // Verifica se é upgrade de severidade
+    const previousSev = memoryCacheSeverity.get(cityName);
+    const isUpgrade = previousSev !== undefined && sevPriority > previousSev;
+
+    const emoji = sev === "red" ? "🔴" : sev === "yellow" ? "🟡" : "⚠️";
+
+    let msg = `${emoji} <b>ALERTA INMET</b> — ${cityName.toUpperCase()}\n`;
+    if (isUpgrade) {
+      msg = `⚠️🔺 <b>ALERTA ELEVADO</b> — ${cityName.toUpperCase()}\n`;
+    }
+    msg += `📋 Evento: ${alert.evento}\n`;
+    msg += `🎯 Severidade: ${alert.severidade}\n`;
+    if (alert.fim) {
+      const fimDate = new Date(alert.fim.replace(" ", "T"));
+      msg += `⏰ Válido até: ${fimDate.toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      })}\n`;
+    }
+    if (alert.descricao && alert.descricao.length < 250) {
+      msg += `ℹ️ ${alert.descricao}\n`;
+    }
+    msg += `\n🔗 <a href="${alert.link}">Ver detalhes</a>`;
+
+    const sent = await tgSend(msg);
+
+    if (sent?.ok) {
+      markAlertSent(cityName, sevPriority);
+      addCityToday(cityName);
+      sentCount++;
+
+      const upgradeText = isUpgrade ? " [ELEVADO]" : "";
+      console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento} (${alert.severidade})${upgradeText}`);
+
+      if (sev === "red" && sent?.result?.message_id) {
+        await tgPin(sent.result.message_id);
+      }
+    } else {
+      console.log(`❌ Falha ao enviar para ${cityName}: ${sent?.description || 'erro desconhecido'}`);
+    }
+
+    await sleep(800);
+  }
+
   return sentCount;
 }
 
@@ -645,7 +725,7 @@ async function processRainForCity(city) {
       const sent = await tgSend(msg);
       
       if (sent?.ok) {
-        markAlertSent(rainKey);
+        markAlertSentSimple(rainKey);
         addCityToday(city.name);
         console.log(`✉️ Alerta de chuva enviado: ${city.name} às ${h.time}`);
       }
@@ -660,7 +740,10 @@ async function processRainForCity(city) {
 // ===================== EXECUÇÕES =====================
 async function monitorRun() {
   console.log(`\n🚀 Iniciando monitoramento às ${new Date().toLocaleString('pt-BR')}`);
-  
+
+  // Limpa cache em memória se mudou o dia
+  clearMemoryCacheIfNewDay();
+
   // PRIORIDADE 1: INMET (oficial)
   console.log("\n=== FASE 1: Alertas INMET (oficial) ===");
   const inmetCount = await processINMETAlerts();
