@@ -150,14 +150,24 @@ function shouldSendAlert(cityName, currentPriority, currentValidUntil) {
   return { send: true, isUpgrade: false }; // Novo alerta ou anterior expirou
 }
 
-// Marca alerta como enviado com severidade e validade
-function markAlertSent(cityName, priority, validUntil) {
+// Marca alerta como enviado com severidade, validade e detalhes
+function markAlertSent(cityName, priority, validUntil, details = {}) {
+  const alertData = {
+    priority,
+    validUntil,
+    evento: details.evento || "",
+    severidadeLabel: details.severidadeLabel || "",
+    descricao: details.descricao || "",
+    link: details.link || "",
+    sentAt: new Date().toISOString()
+  };
+
   // Salva em memória
-  memoryCacheAlerts.set(cityName, { priority, validUntil });
+  memoryCacheAlerts.set(cityName, alertData);
 
   // Também salva em arquivo (backup)
   const cache = loadAlertCache();
-  cache.sent[cityName] = { priority, validUntil };
+  cache.sent[cityName] = alertData;
 
   // Limpa entradas antigas (expiradas há mais de 7 dias)
   const weekAgo = new Date();
@@ -681,7 +691,12 @@ async function processINMETAlerts() {
     const sent = await tgSend(msg);
 
     if (sent?.ok) {
-      markAlertSent(cityName, sevPriority, validUntil);
+      markAlertSent(cityName, sevPriority, validUntil, {
+        evento: alert.evento,
+        severidadeLabel: alert.severidade,
+        descricao: alert.descricao,
+        link: alert.link
+      });
       addCityToday(cityName);
       sentCount++;
 

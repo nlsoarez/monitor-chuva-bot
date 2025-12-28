@@ -240,13 +240,42 @@ function getDashboardHTML() {
       border-radius: 8px;
       margin-bottom: 10px;
       border-left: 4px solid;
+      cursor: pointer;
+      transition: all 0.2s ease;
     }
+    .alert-item:hover { background: rgba(0,0,0,0.3); }
     .alert-item.danger { border-color: #dc3545; }
     .alert-item.warning { border-color: #ffc107; }
     .alert-item.info { border-color: #17a2b8; }
     .alert-item.expired { opacity: 0.5; }
+    .alert-header { display: flex; justify-content: space-between; align-items: center; }
     .alert-city { font-weight: 600; font-size: 1.1em; }
+    .alert-toggle { font-size: 0.8em; color: #888; transition: transform 0.2s; }
+    .alert-item.expanded .alert-toggle { transform: rotate(180deg); }
     .alert-meta { font-size: 0.85em; color: #888; margin-top: 5px; }
+    .alert-details {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease, padding 0.3s ease;
+      padding: 0;
+    }
+    .alert-item.expanded .alert-details {
+      max-height: 300px;
+      padding-top: 12px;
+      margin-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+    }
+    .alert-detail-row { margin-bottom: 8px; font-size: 0.9em; }
+    .alert-detail-row label { color: #888; display: block; font-size: 0.75em; margin-bottom: 2px; }
+    .alert-detail-row value { color: #e4e4e4; }
+    .alert-link {
+      display: inline-block;
+      margin-top: 8px;
+      color: #00d4ff;
+      text-decoration: none;
+      font-size: 0.85em;
+    }
+    .alert-link:hover { text-decoration: underline; }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -364,12 +393,21 @@ function getDashboardHTML() {
       <div class="card">
         <h2>🔔 Alertas Ativos (${activeAlerts.length})</h2>
         ${activeAlerts.length === 0 ? '<div class="empty">Nenhum alerta ativo</div>' : ''}
-        ${activeAlerts.map(a => `
-          <div class="alert-item ${a.severityClass}">
-            <div class="alert-city">${a.city}</div>
+        ${activeAlerts.map((a, i) => `
+          <div class="alert-item ${a.severityClass}" onclick="toggleAlert(this)">
+            <div class="alert-header">
+              <div class="alert-city">${a.city}</div>
+              <span class="alert-toggle">▼</span>
+            </div>
             <div class="alert-meta">
-              <span class="badge ${a.severityClass}">${a.severityLabel}</span>
+              <span class="badge ${a.severityClass}">${a.severidadeLabel || a.severityLabel}</span>
               Válido até: ${a.expiry.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+            </div>
+            <div class="alert-details">
+              ${a.evento ? `<div class="alert-detail-row"><label>Evento</label><value>${a.evento}</value></div>` : ''}
+              ${a.descricao ? `<div class="alert-detail-row"><label>Descrição</label><value>${a.descricao}</value></div>` : ''}
+              ${a.sentAt ? `<div class="alert-detail-row"><label>Enviado em</label><value>${new Date(a.sentAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</value></div>` : ''}
+              ${a.link ? `<a href="${a.link}" target="_blank" class="alert-link" onclick="event.stopPropagation()">🔗 Ver detalhes no INMET</a>` : ''}
             </div>
           </div>
         `).join('')}
@@ -401,11 +439,20 @@ function getDashboardHTML() {
         <h2>⏰ Alertas Expirados (${expiredAlerts.length})</h2>
         ${expiredAlerts.length === 0 ? '<div class="empty">Nenhum alerta expirado</div>' : ''}
         ${expiredAlerts.slice(0, 5).map(a => `
-          <div class="alert-item ${a.severityClass} expired">
-            <div class="alert-city">${a.city}</div>
+          <div class="alert-item ${a.severityClass} expired" onclick="toggleAlert(this)">
+            <div class="alert-header">
+              <div class="alert-city">${a.city}</div>
+              <span class="alert-toggle">▼</span>
+            </div>
             <div class="alert-meta">
-              <span class="badge ${a.severityClass}">${a.severityLabel}</span>
+              <span class="badge ${a.severityClass}">${a.severidadeLabel || a.severityLabel}</span>
               Expirou: ${a.expiry.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+            </div>
+            <div class="alert-details">
+              ${a.evento ? `<div class="alert-detail-row"><label>Evento</label><value>${a.evento}</value></div>` : ''}
+              ${a.descricao ? `<div class="alert-detail-row"><label>Descrição</label><value>${a.descricao}</value></div>` : ''}
+              ${a.sentAt ? `<div class="alert-detail-row"><label>Enviado em</label><value>${new Date(a.sentAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</value></div>` : ''}
+              ${a.link ? `<a href="${a.link}" target="_blank" class="alert-link" onclick="event.stopPropagation()">🔗 Ver detalhes no INMET</a>` : ''}
             </div>
           </div>
         `).join('')}
@@ -418,6 +465,10 @@ function getDashboardHTML() {
   </div>
 
   <script>
+    function toggleAlert(element) {
+      element.classList.toggle('expanded');
+    }
+
     async function runNow() {
       const btn = document.querySelector('.btn');
       btn.disabled = true;
