@@ -101,66 +101,75 @@ function loadAlertCache() {
   }
 }
 
-// Cache em memória: cidade -> máxima severidade enviada hoje (1=unknown, 2=yellow, 3=red)
-const memoryCacheSeverity = new Map();
-let memoryCacheDate = todayStr();
-
-function clearMemoryCacheIfNewDay() {
-  const today = todayStr();
-  if (today !== memoryCacheDate) {
-    console.log(`🗓️ Novo dia detectado (${memoryCacheDate} → ${today}). Limpando cache em memória.`);
-    memoryCacheSeverity.clear();
-    memoryCacheDate = today;
-  }
-}
+// Cache em memória: cidade -> { priority, validUntil }
+const memoryCacheAlerts = new Map();
 
 function saveAlertCache(cache) {
   ensureData();
   fs.writeFileSync(alertsCacheFile(), JSON.stringify(cache, null, 2));
 }
 
-// Verifica se deve enviar alerta: retorna true se severidade atual é maior que a já enviada
-function shouldSendAlert(cityName, currentPriority) {
-  const today = todayStr();
+// Verifica se deve enviar alerta baseado em:
+// 1. Alerta anterior expirou (validUntil < agora)
+// 2. OU severidade atual é maior que a anterior
+function shouldSendAlert(cityName, currentPriority, currentValidUntil) {
+  const now = new Date();
 
   // Verifica cache em memória primeiro
-  const memorySev = memoryCacheSeverity.get(cityName);
-  if (memorySev !== undefined && currentPriority <= memorySev) {
-    return false; // Já enviou alerta igual ou mais severo
+  const cached = memoryCacheAlerts.get(cityName);
+  if (cached) {
+    const cachedExpiry = new Date(cached.validUntil);
+
+    // Se alerta anterior ainda é válido E severidade não aumentou, não enviar
+    if (cachedExpiry > now && currentPriority <= cached.priority) {
+      return { send: false, reason: `válido até ${cachedExpiry.toLocaleString('pt-BR')}` };
+    }
+
+    // Se severidade aumentou, enviar mesmo que anterior não expirou
+    if (currentPriority > cached.priority) {
+      return { send: true, isUpgrade: true };
+    }
   }
 
-  // Verifica arquivo (backup)
+  // Verifica arquivo (backup para restarts)
   const cache = loadAlertCache();
-  const key = `inmet_${cityName}_${today}`;
-  const fileSev = cache.sent[key];
+  const cityCache = cache.sent[cityName];
 
-  if (fileSev !== undefined && currentPriority <= fileSev) {
-    return false; // Já enviou alerta igual ou mais severo
+  if (cityCache && cityCache.validUntil) {
+    const fileExpiry = new Date(cityCache.validUntil);
+
+    if (fileExpiry > now && currentPriority <= cityCache.priority) {
+      return { send: false, reason: `válido até ${fileExpiry.toLocaleString('pt-BR')}` };
+    }
+
+    if (currentPriority > cityCache.priority) {
+      return { send: true, isUpgrade: true };
+    }
   }
 
-  return true; // Nova severidade ou severidade maior - enviar!
+  return { send: true, isUpgrade: false }; // Novo alerta ou anterior expirou
 }
 
-// Marca alerta como enviado com sua severidade
-function markAlertSent(cityName, priority) {
-  const today = todayStr();
-  const key = `inmet_${cityName}_${today}`;
-
+// Marca alerta como enviado com severidade e validade
+function markAlertSent(cityName, priority, validUntil) {
   // Salva em memória
-  memoryCacheSeverity.set(cityName, priority);
+  memoryCacheAlerts.set(cityName, { priority, validUntil });
 
   // Também salva em arquivo (backup)
   const cache = loadAlertCache();
-  cache.sent[key] = priority; // Agora guarda a severidade, não só a data
+  cache.sent[cityName] = { priority, validUntil };
 
+  // Limpa entradas antigas (expiradas há mais de 7 dias)
   const weekAgo = new Date();
   weekAgo.setDate(weekAgo.getDate() - 7);
-  const cutoff = weekAgo.toISOString().slice(0, 10);
 
-  for (const k in cache.sent) {
-    // Limpa entradas antigas (chaves que contêm datas antigas)
-    if (k.includes("_2") && k < `inmet_A_${cutoff}`) {
-      delete cache.sent[k];
+  for (const city in cache.sent) {
+    const entry = cache.sent[city];
+    if (entry && entry.validUntil) {
+      const expiry = new Date(entry.validUntil);
+      if (expiry < weekAgo) {
+        delete cache.sent[city];
+      }
     }
   }
 
@@ -171,7 +180,7 @@ function markAlertSent(cityName, priority) {
 function wasAlertSent(key) {
   const cache = loadAlertCache();
   const today = todayStr();
-  return cache.sent[key] === today || memoryCacheSeverity.has(key);
+  return cache.sent[key] === today;
 }
 
 function markAlertSentSimple(key) {
@@ -636,21 +645,22 @@ async function processINMETAlerts() {
   for (const [cityName, { alert, sev, priority }] of alertsByCity) {
     const sevPriority = priority;
 
-    // Verifica se deve enviar: novo alerta ou severidade maior que a já enviada
-    if (!shouldSendAlert(cityName, sevPriority)) {
-      console.log(`⏭️ Alerta INMET já enviado hoje (sev=${sevPriority}): ${cityName}`);
+    // Converter fim para ISO string para comparação
+    const validUntil = alert.fim ? new Date(alert.fim.replace(" ", "T")).toISOString() : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    // Verifica se deve enviar: alerta expirou ou severidade aumentou
+    const checkResult = shouldSendAlert(cityName, sevPriority, validUntil);
+    if (!checkResult.send) {
+      console.log(`⏭️ Alerta INMET já ativo (${checkResult.reason}): ${cityName}`);
       continue;
     }
 
-    // Verifica se é upgrade de severidade
-    const previousSev = memoryCacheSeverity.get(cityName);
-    const isUpgrade = previousSev !== undefined && sevPriority > previousSev;
-
+    const isUpgrade = checkResult.isUpgrade;
     const emoji = sev === "red" ? "🔴" : sev === "yellow" ? "🟡" : "⚠️";
 
     let msg = `${emoji} <b>ALERTA INMET</b> — ${cityName.toUpperCase()}\n`;
     if (isUpgrade) {
-      msg = `⚠️🔺 <b>ALERTA ELEVADO</b> — ${cityName.toUpperCase()}\n`;
+      msg = `🔺 <b>ALERTA ELEVADO</b> — ${cityName.toUpperCase()}\n`;
     }
     msg += `📋 Evento: ${alert.evento}\n`;
     msg += `🎯 Severidade: ${alert.severidade}\n`;
@@ -671,12 +681,13 @@ async function processINMETAlerts() {
     const sent = await tgSend(msg);
 
     if (sent?.ok) {
-      markAlertSent(cityName, sevPriority);
+      markAlertSent(cityName, sevPriority, validUntil);
       addCityToday(cityName);
       sentCount++;
 
       const upgradeText = isUpgrade ? " [ELEVADO]" : "";
-      console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento} (${alert.severidade})${upgradeText}`);
+      const validText = alert.fim ? ` [válido até ${alert.fim}]` : "";
+      console.log(`✉️ Alerta INMET enviado: ${cityName} - ${alert.evento} (${alert.severidade})${upgradeText}${validText}`);
 
       if (sev === "red" && sent?.result?.message_id) {
         await tgPin(sent.result.message_id);
@@ -740,9 +751,6 @@ async function processRainForCity(city) {
 // ===================== EXECUÇÕES =====================
 async function monitorRun() {
   console.log(`\n🚀 Iniciando monitoramento às ${new Date().toLocaleString('pt-BR')}`);
-
-  // Limpa cache em memória se mudou o dia
-  clearMemoryCacheIfNewDay();
 
   // PRIORIDADE 1: INMET (oficial)
   console.log("\n=== FASE 1: Alertas INMET (oficial) ===");
