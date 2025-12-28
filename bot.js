@@ -101,30 +101,53 @@ function loadAlertCache() {
   }
 }
 
+// Cache em memória (persiste durante execução do processo)
+const memoryCache = new Set();
+let memoryCacheDate = todayStr();
+
+function clearMemoryCacheIfNewDay() {
+  const today = todayStr();
+  if (today !== memoryCacheDate) {
+    console.log(`🗓️ Novo dia detectado (${memoryCacheDate} → ${today}). Limpando cache em memória.`);
+    memoryCache.clear();
+    memoryCacheDate = today;
+  }
+}
+
 function saveAlertCache(cache) {
   ensureData();
   fs.writeFileSync(alertsCacheFile(), JSON.stringify(cache, null, 2));
 }
 
 function wasAlertSent(key) {
+  // Primeiro verifica cache em memória (mais confiável no Railway)
+  if (memoryCache.has(key)) {
+    return true;
+  }
+
+  // Depois verifica arquivo (pode não persistir entre restarts)
   const cache = loadAlertCache();
   const today = todayStr();
   return cache.sent[key] === today;
 }
 
 function markAlertSent(key) {
+  // Salva em memória
+  memoryCache.add(key);
+
+  // Também salva em arquivo (backup)
   const cache = loadAlertCache();
   const today = todayStr();
   cache.sent[key] = today;
-  
+
   const weekAgo = new Date();
   weekAgo.setDate(weekAgo.getDate() - 7);
   const cutoff = weekAgo.toISOString().slice(0, 10);
-  
+
   for (const k in cache.sent) {
     if (cache.sent[k] < cutoff) delete cache.sent[k];
   }
-  
+
   saveAlertCache(cache);
 }
 
@@ -679,7 +702,10 @@ async function processRainForCity(city) {
 // ===================== EXECUÇÕES =====================
 async function monitorRun() {
   console.log(`\n🚀 Iniciando monitoramento às ${new Date().toLocaleString('pt-BR')}`);
-  
+
+  // Limpa cache em memória se mudou o dia
+  clearMemoryCacheIfNewDay();
+
   // PRIORIDADE 1: INMET (oficial)
   console.log("\n=== FASE 1: Alertas INMET (oficial) ===");
   const inmetCount = await processINMETAlerts();
