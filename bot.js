@@ -104,6 +104,34 @@ function loadAlertCache() {
 // Cache em memória: cidade -> { priority, validUntil }
 const memoryCacheAlerts = new Map();
 
+// Carrega cache do arquivo para memória (executa na inicialização)
+function loadCacheIntoMemory() {
+  try {
+    const cache = loadAlertCache();
+    const now = new Date();
+    let loaded = 0;
+    let expired = 0;
+
+    for (const [cityName, data] of Object.entries(cache.sent || {})) {
+      if (data && data.validUntil) {
+        const expiry = new Date(data.validUntil);
+        if (expiry > now) {
+          memoryCacheAlerts.set(cityName, data);
+          loaded++;
+        } else {
+          expired++;
+        }
+      }
+    }
+
+    console.log(`📦 Cache carregado: ${loaded} alertas ativos, ${expired} expirados`);
+    return loaded;
+  } catch (e) {
+    console.error("⚠️ Erro ao carregar cache:", e.message);
+    return 0;
+  }
+}
+
 function saveAlertCache(cache) {
   ensureData();
   fs.writeFileSync(alertsCacheFile(), JSON.stringify(cache, null, 2));
@@ -825,6 +853,16 @@ function initBot() {
   }
 
   ensureData();
+
+  // Carrega cache do arquivo para memória (importante após restarts)
+  const cachedAlerts = loadCacheIntoMemory();
+  if (cachedAlerts > 0) {
+    console.log(`📋 ${cachedAlerts} alertas ativos carregados do cache`);
+    // Listar cidades em cache
+    const cities = Array.from(memoryCacheAlerts.keys());
+    console.log(`   Cidades: ${cities.slice(0, 5).join(", ")}${cities.length > 5 ? ` e mais ${cities.length - 5}...` : ""}`);
+  }
+
   console.log("✅ Bot inicializado com sucesso");
 }
 

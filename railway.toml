@@ -1,0 +1,14 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# IMPORTANTE: Configure um Volume no Railway Dashboard!
+# 1. Vá para Settings > Volumes
+# 2. Clique em "New Volume"
+# 3. Mount Path: /app/data
+# 4. Isso persistirá o cache entre restarts
