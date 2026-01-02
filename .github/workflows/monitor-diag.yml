@@ -1,8 +1,9 @@
-name: Diagnóstico Diário 22h BRT
+name: Resumo Diário 12h e 22h BRT
 
 on:
   schedule:
-    - cron: "0 1 * * *"     # 01:00 UTC ≈ 22h BRT
+    - cron: "0 15 * * *"    # 15:00 UTC = 12h BRT
+    - cron: "0 1 * * *"     # 01:00 UTC = 22h BRT
   workflow_dispatch:
 
 permissions:
@@ -26,7 +27,10 @@ jobs:
 
       - name: Executar bot (resumo)
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          EVOLUTION_API_URL: ${{ secrets.EVOLUTION_API_URL }}
+          EVOLUTION_API_KEY: ${{ secrets.EVOLUTION_API_KEY }}
+          EVOLUTION_INSTANCE: ${{ secrets.EVOLUTION_INSTANCE }}
+          WHATSAPP_GROUP_ID: ${{ secrets.WHATSAPP_GROUP_ID }}
           TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
           RUN_MODE: "daily"
         run: node bot.js
