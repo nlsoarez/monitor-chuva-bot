@@ -822,22 +822,74 @@ async function monitorRun() {
 
 async function dailySummary() {
   console.log(`\n📋 Gerando resumo diário às ${new Date().toLocaleString('pt-BR')}`);
-  
+
   const st = loadState();
   const cities = (st.cities || []).slice().sort();
-  
-  if (cities.length === 0) {
+
+  // Buscar detalhes dos alertas ativos do cache
+  const cache = loadAlertCache();
+  const now = new Date();
+  const activeAlerts = [];
+
+  for (const [cityName, data] of Object.entries(cache.sent || {})) {
+    if (data && data.validUntil && typeof data === 'object') {
+      const expiry = new Date(data.validUntil);
+      if (expiry > now) {
+        activeAlerts.push({
+          city: cityName,
+          evento: data.evento || "Alerta meteorológico",
+          severidade: data.severidadeLabel || "Desconhecida",
+          priority: data.priority || 1,
+          validUntil: expiry
+        });
+      }
+    }
+  }
+
+  // Ordenar por prioridade (mais severo primeiro)
+  activeAlerts.sort((a, b) => b.priority - a.priority);
+
+  if (cities.length === 0 && activeAlerts.length === 0) {
     await tgSend("✅ <b>Resumo Diário</b>\n\nNenhum alerta registrado hoje. Tudo tranquilo! 🌤️");
   } else {
-    const msg = `⚠️ <b>Resumo Diário</b>\n\n${cities.length} cidade(s) com alertas hoje:\n\n${cities.join(", ")}`;
+    let msg = `⚠️ <b>Resumo Diário</b>\n\n`;
+
+    if (activeAlerts.length > 0) {
+      msg += `🔴 <b>${activeAlerts.length} alerta(s) ativo(s):</b>\n\n`;
+
+      for (const alert of activeAlerts) {
+        const emoji = alert.priority === 3 ? "🔴" : alert.priority === 2 ? "🟡" : "⚠️";
+        const validoAte = alert.validUntil.toLocaleString("pt-BR", {
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          timeZone: "America/Sao_Paulo"
+        });
+        msg += `${emoji} <b>${alert.city}</b>\n`;
+        msg += `   📋 ${alert.evento}\n`;
+        msg += `   🎯 ${alert.severidade}\n`;
+        msg += `   ⏰ Até: ${validoAte}\n\n`;
+      }
+    }
+
+    if (cities.length > 0) {
+      const citiesWithoutActiveAlert = cities.filter(
+        c => !activeAlerts.find(a => a.city === c)
+      );
+      if (citiesWithoutActiveAlert.length > 0) {
+        msg += `📍 Outras cidades alertadas hoje: ${citiesWithoutActiveAlert.join(", ")}`;
+      }
+    }
+
     await tgSend(msg);
   }
-  
+
   st.closed = true;
   saveState(st);
   rollTomorrow();
-  
-  console.log(`✅ Resumo enviado. ${cities.length} cidades com alertas.`);
+
+  console.log(`✅ Resumo enviado. ${cities.length} cidades, ${activeAlerts.length} alertas ativos.`);
 }
 
 // ===================== INICIALIZAÇÃO =====================
