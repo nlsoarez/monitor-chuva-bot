@@ -388,20 +388,24 @@ function getDashboardHTML() {
       stroke-width: 1.5;
     }
     .brazil-svg .state.alert-danger {
-      fill: rgba(237, 27, 46, 0.35);
-      stroke: var(--accent);
-      stroke-width: 2;
+      fill: rgba(237, 27, 46, 0.5);
+      stroke: #ed1b2e;
+      stroke-width: 1.5;
+      filter: drop-shadow(0 0 4px rgba(237, 27, 46, 0.8));
     }
     .brazil-svg .state.alert-danger:hover {
-      fill: rgba(237, 27, 46, 0.5);
+      fill: rgba(237, 27, 46, 0.7);
+      filter: drop-shadow(0 0 6px rgba(237, 27, 46, 1));
     }
     .brazil-svg .state.alert-warning {
-      fill: rgba(240, 136, 62, 0.3);
-      stroke: var(--warning);
-      stroke-width: 2;
+      fill: rgba(240, 136, 62, 0.45);
+      stroke: #f0883e;
+      stroke-width: 1.5;
+      filter: drop-shadow(0 0 4px rgba(240, 136, 62, 0.8));
     }
     .brazil-svg .state.alert-warning:hover {
-      fill: rgba(240, 136, 62, 0.45);
+      fill: rgba(240, 136, 62, 0.6);
+      filter: drop-shadow(0 0 6px rgba(240, 136, 62, 1));
     }
     .brazil-svg .state-label {
       font-size: 10px;
