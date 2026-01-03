@@ -388,24 +388,24 @@ function getDashboardHTML() {
       stroke-width: 1.5;
     }
     .brazil-svg .state.alert-danger {
-      fill: rgba(237, 27, 46, 0.5);
-      stroke: #ed1b2e;
-      stroke-width: 1.5;
-      filter: drop-shadow(0 0 4px rgba(237, 27, 46, 0.8));
+      fill: rgba(237, 27, 46, 0.6);
+      stroke: var(--border);
+      stroke-width: 1;
+      filter: drop-shadow(0 0 8px rgba(237, 27, 46, 0.9)) drop-shadow(0 0 3px rgba(237, 27, 46, 1));
     }
     .brazil-svg .state.alert-danger:hover {
-      fill: rgba(237, 27, 46, 0.7);
-      filter: drop-shadow(0 0 6px rgba(237, 27, 46, 1));
+      fill: rgba(237, 27, 46, 0.8);
+      filter: drop-shadow(0 0 12px rgba(237, 27, 46, 1)) drop-shadow(0 0 5px rgba(237, 27, 46, 1));
     }
     .brazil-svg .state.alert-warning {
-      fill: rgba(240, 136, 62, 0.45);
-      stroke: #f0883e;
-      stroke-width: 1.5;
-      filter: drop-shadow(0 0 4px rgba(240, 136, 62, 0.8));
+      fill: rgba(240, 136, 62, 0.55);
+      stroke: var(--border);
+      stroke-width: 1;
+      filter: drop-shadow(0 0 8px rgba(240, 136, 62, 0.9)) drop-shadow(0 0 3px rgba(240, 136, 62, 1));
     }
     .brazil-svg .state.alert-warning:hover {
-      fill: rgba(240, 136, 62, 0.6);
-      filter: drop-shadow(0 0 6px rgba(240, 136, 62, 1));
+      fill: rgba(240, 136, 62, 0.75);
+      filter: drop-shadow(0 0 12px rgba(240, 136, 62, 1)) drop-shadow(0 0 5px rgba(240, 136, 62, 1));
     }
     .brazil-svg .state-label {
       font-size: 10px;
